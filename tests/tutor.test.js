@@ -21,6 +21,7 @@ import {
   extensionForMime,
   pickBritishVoice,
   pickRecorderMime,
+  recognitionProblem,
 } from '../js/speech.js';
 import { dueCards, ensureSeed, reviewCard, slug, upsertPhrase } from '../js/srs.js';
 import { createMemoryStore, loadSettings, saveSettings } from '../js/storage.js';
@@ -344,10 +345,15 @@ test('speech path prefers British voices and iPhone mp4 recordings', () => {
   ]);
   assert.equal(voice.name, 'Daniel');
   assert.equal(pickRecorderMime((type) => type === 'audio/mp4' || type === 'audio/webm'), 'audio/mp4');
+  assert.equal(pickRecorderMime(() => false, { ios: true }), 'audio/mp4');
   assert.equal(extensionForMime('audio/mp4'), 'm4a');
   assert.equal(describeInputPath({ inputMode: 'auto', hasRecognition: true, hasRecorder: true }), 'browser');
+  assert.equal(describeInputPath({ inputMode: 'auto', hasRecognition: true, hasRecorder: true, preferRecorder: true }), 'record');
   assert.equal(describeInputPath({ inputMode: 'auto', hasRecognition: false, hasRecorder: true }), 'record');
   assert.equal(describeInputPath({ inputMode: 'browser', hasRecognition: false, hasRecorder: false }), 'type');
+  assert.match(recognitionProblem('not-allowed'), /Mikrofon|Dyktowanie|mikrofonu/i);
+  assert.match(recognitionProblem('no-start', { standalone: true, hasKey: false }), /klucza/);
+  assert.match(recognitionProblem('network'), /internetu/);
 });
 
 test('the static site uses relative paths and does not contain a key', () => {

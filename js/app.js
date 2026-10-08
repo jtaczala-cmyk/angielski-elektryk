@@ -7,9 +7,13 @@ import {
   describeInputPath,
   extensionForMime,
   getRecognitionCtor,
+  isIos,
+  isStandalone,
   mediaRecorderSupported,
   pathLabel,
   pickRecorderMime,
+  playWithWebAudio,
+  recognitionProblem,
   speakBrowser,
   startBrowserRecognition,
   stopBrowserSpeech,
@@ -49,6 +53,7 @@ const ui = {
   formNote: '',
   installEvent: null,
   speaking: false,
+  providerSpeech: true,
 };
 
 let recognizer = null;
@@ -230,6 +235,11 @@ function boot() {
     fit();
   }
   if ('serviceWorker' in navigator) {
+    if (navigator.serviceWorker.controller) sessionStorage.setItem('ae.had-controller', '1');
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (sessionStorage.getItem('ae.had-controller') === '1') location.reload();
+      sessionStorage.setItem('ae.had-controller', '1');
+    });
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
   render();
@@ -255,7 +265,27 @@ function inputPath() {
     inputMode: settings.inputMode,
     hasRecognition: Boolean(getRecognitionCtor()) && !ui.recognitionBroken,
     hasRecorder: mediaRecorderSupported(),
+    preferRecorder: isStandalone() || ui.recognitionBroken,
   });
+}
+
+function showProblem(text) {
+  ui.error = text;
+  setStatus(text);
+  const screen = document.querySelector('.screen');
+  if (!screen) return;
+  let node = screen.querySelector('.error');
+  if (!node) {
+    node = el('p', 'error', text);
+    const dock = screen.querySelector('.dock');
+    if (dock) screen.insertBefore(node, dock);
+    else screen.append(node);
+  } else node.textContent = text;
+}
+
+function clearProblem() {
+  ui.error = '';
+  document.querySelector('.screen .error')?.remove();
 }
 
 function renderTalk() {
@@ -264,7 +294,7 @@ function renderTalk() {
   if (!activeKey(settings)) {
     const banner = el('p', 'banner');
     banner.append(el('strong', null, 'Tryb próbny. '));
-    banner.append('Bez klucza API odpowiadam z pamięci telefonu, nie z modelu. Klucz dodasz w ustawieniach.');
+    banner.append('Bez klucza API odpowiadam z pamięci telefonu, nie z modelu. Pisz na dole albo dodaj klucz w Ustawieniach. Na iPhonie z ekranu początkowego mikrofon wymaga klucza.');
     screen.append(banner);
   }
   const hasChat = messages.some((message) => !message.hidden);
@@ -657,10 +687,120 @@ function gradeCard(id, grade) {
   }, scene ? 220 : 0);
 }
 
+function probeRecognition() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    try {
+      const rec = startBrowserRecognition({
+        onStart: () => {
+          try { rec.abort(); } catch { /* ignore */ }
+          done(true);
+        },
+        onError: () => done(false),
+        onEnd: () => done(false),
+      });
+      window.setTimeout(() => {
+        try { rec.abort(); } catch { /* ignore */ }
+        done(false);
+      }, 1500);
+    } catch {
+      done(false);
+    }
+  });
+}
+
+async function diagnose(button, report) {
+  button.disabled = true;
+  report.hidden = false;
+  const lines = [];
+  const standalone = isStandalone();
+  lines.push(standalone ? 'Tryb: aplikacja z ekranu początkowego.' : 'Tryb: karta Safari.');
+  if (!getRecognitionCtor()) lines.push('Dyktowanie: brak w tej przeglądarce. Zostaje pisanie, a z kluczem także nagranie.');
+  else if (standalone) lines.push('Dyktowanie: API jest, ale z ikony na iPhonie często milczy. Z kluczem nagram dźwięk (audio/mp4).');
+  else {
+    const started = await probeRecognition();
+    lines.push(started
+      ? 'Dyktowanie: wystartowało. Mów po angielsku po stuknięciu Mów.'
+      : mediaRecorderSupported()
+        ? 'Dyktowanie: nie wystartowało. Z kluczem nagram dźwięk, bez klucza wpisz zdanie.'
+        : 'Dyktowanie: nie wystartowało. Zostaje pisanie.');
+  }
+  if (!mediaRecorderSupported()) lines.push('Nagranie: ta przeglądarka go nie umie.');
+  else {
+    const mime = pickRecorderMime((type) => {
+      try { return MediaRecorder.isTypeSupported(type); } catch { return false; }
+    }, { ios: isIos() });
+    lines.push(`Nagranie: jest, format ${mime || 'domyślny przeglądarki'}.`);
+  }
+  try {
+    const stream = await Promise.race([
+      navigator.mediaDevices.getUserMedia({ audio: true }),
+      new Promise((_, reject) => {
+        window.setTimeout(() => reject(Object.assign(new Error('timeout'), { name: 'TimeoutError' })), 8000);
+      }),
+    ]);
+    stream.getTracks().forEach((track) => track.stop());
+    lines.push('Mikrofon: zgoda jest.');
+  } catch (err) {
+    lines.push(err?.name === 'NotAllowedError' || err?.name === 'SecurityError'
+      ? 'Mikrofon: odmowa. Zezwól w Ustawienia → Safari → Mikrofon. Z ikony na ekranie: Ustawienia → Elektryk EN.'
+      : err?.name === 'TimeoutError'
+        ? 'Mikrofon: przeglądarka nie odpowiedziała. Zezwól na mikrofon w ustawieniach iPhone’a i stuknij jeszcze raz.'
+        : `Mikrofon: nie działa (${err?.name || 'błąd'}).`);
+  }
+  if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) lines.push('Głos iPhone’a: brak.');
+  else {
+    try {
+      unlockAudio();
+      await speakBrowser('Test.', { lang: 'en-GB', rate: 1 });
+      lines.push('Głos iPhone’a: próba „Test” skończona. Jeśli była cisza, włącz dźwięk i stuknij jeszcze raz.');
+    } catch {
+      lines.push('Głos iPhone’a: nie zagrał. Włącz dźwięk, stuknij ekran i spróbuj ponownie.');
+    }
+  }
+  const key = activeKey(settings);
+  if (!key) {
+    lines.push('Klucz: brak. Pisanie działa w trybie próbnym (odpowiedź z telefonu, nie z modelu). Klucz wklejasz poniżej — OpenAI albo xAI.');
+  } else {
+    try {
+      const result = await verifyKey({ provider: settings.provider, apiKey: key });
+      lines.push(result.ok
+        ? `Klucz ${settings.provider === 'xai' ? 'xAI' : 'OpenAI'}: działa.`
+        : `Klucz odrzucony (${result.status}). ${result.message || 'Sprawdź, czy wkleiłeś go w całości.'}`);
+    } catch (err) {
+      lines.push(polishError(err));
+    }
+  }
+  if (settings.provider === 'xai') {
+    lines.push('xAI: rozmowa idzie do api.x.ai. Gdy nagranie albo głos dostawcy odpadnie, zostaje pisanie i głos iPhone’a (en-GB).');
+  }
+  ui.diagnostics = lines.join('\n');
+  report.textContent = ui.diagnostics;
+  button.disabled = false;
+}
+
 function renderSettings() {
   const screen = el('section', 'screen');
   screen.dataset.screen = 'settings';
   const scroll = el('div', 'scroll');
+
+  const doctor = el('section', 'panel');
+  doctor.append(el('h2', null, 'Czy działa?'));
+  doctor.append(el('p', null, 'Sprawdza mikrofon, dyktowanie, głos iPhone’a i klucz. Wynik zostaje na tym ekranie.'));
+  const test = el('button', 'send', 'Sprawdź telefon');
+  test.type = 'button';
+  test.id = 'diagnose';
+  const report = el('p', 'diagnostics', ui.diagnostics || '');
+  report.id = 'diagnostics';
+  if (!ui.diagnostics) report.hidden = true;
+  test.addEventListener('click', () => diagnose(test, report));
+  doctor.append(test, report);
+  scroll.append(doctor);
 
   const connection = el('section', 'panel');
   connection.append(el('h2', null, 'Połączenie'));
@@ -796,7 +936,7 @@ function renderSettings() {
   });
   inputField.append(input);
   talk.append(inputField);
-  talk.append(el('p', 'help', 'Na iPhonie dyktowanie działa w Safari (webkitSpeechRecognition, język en-GB), jeśli włączysz Dyktowanie i dodasz English (UK): Ustawienia → Ogólne → Klawiatura → Dyktowanie. Po odtworzeniu głosu tworzę nowy mikrofon, bo starsza sesja na iOS potrafi zamilknąć. Gdy dyktowanie nie ruszy, nagrywam i wysyłam plik do transkrypcji. Pisanie jest zawsze pod ręką.'));
+  talk.append(el('p', 'help', 'W Safari na iPhonie najpierw dyktowanie (en-GB). Włącz je: Ustawienia → Ogólne → Klawiatura → Dyktowanie, język English (UK). Z ikony na ekranie początkowym dyktowanie często milczy, więc nagrywam audio/mp4 i wysyłam je do dostawcy — do tego trzeba klucza. Gdy xAI nie przyjmie nagrania albo głosu, zostaje pisanie i głos iPhone’a. Pisanie jest zawsze pod ręką.'));
   scroll.append(talk);
 
   const voice = el('section', 'panel');
@@ -842,7 +982,7 @@ function renderSettings() {
 
   const phone = el('section', 'panel');
   phone.append(el('h2', null, 'Na iPhonie'));
-  phone.append(el('p', null, 'Dodaj stronę do ekranu początkowego: Udostępnij, potem „Do ekranu początkowego”. Otwiera się wtedy jak aplikacja. Pierwsze stuknięcie włącza dźwięk — iOS nie pozwala stronie mówić samej z siebie.'));
+  phone.append(el('p', null, 'Dodaj stronę do ekranu początkowego: Udostępnij, potem „Do ekranu początkowego”. Z ikony mikrofon idzie nagraniem i potrzebuje klucza. W Safari, bez ikony, najpierw próbuje dyktowania. Pisanie na dole działa zawsze. Pierwsze stuknięcie włącza dźwięk.'));
   if (ui.installEvent) {
     const install = el('button', 'send', 'Zainstaluj');
     install.type = 'button';
@@ -944,17 +1084,23 @@ function sendDraft() {
 }
 
 async function onTalk() {
-  unlockAudio(audioEl);
+  unlockAudio();
   stopSpeaking();
   if (ui.busy) return;
   if (ui.listening) {
     stopListening(false);
     return;
   }
+  clearProblem();
   const path = inputPath();
-  if (path === 'type') {
+  if (path === 'record' && !activeKey(settings)) {
+    showProblem('Nagranie mogę wysłać tylko z kluczem API. Wpisz zdanie na dole albo dodaj klucz: Ustawienia → Klucz API.');
     document.getElementById('draft')?.focus();
-    setStatus('Na tym ustawieniu zostaje pisanie.');
+    return;
+  }
+  if (path === 'type') {
+    showProblem('Na tym telefonie zostaje pisanie. Wpisz zdanie i stuknij strzałkę.');
+    document.getElementById('draft')?.focus();
     return;
   }
   if (path === 'browser') startRecognition();
@@ -967,41 +1113,93 @@ function startRecognition() {
   paintListen();
   setStatus('Słucham… mów po angielsku.');
   setLive('');
+  let started = false;
+  let watchdog = 0;
+  const fail = (code) => {
+    window.clearTimeout(watchdog);
+    if (!ui.listening && code !== 'no-start') return;
+    cancelListen = true;
+    ui.recognitionBroken = true;
+    try {
+      recognizer?.abort();
+    } catch {
+      /* already stopped */
+    }
+    recognizer = null;
+    ui.listening = false;
+    paintListen();
+    showProblem(recognitionProblem(code, {
+      standalone: isStandalone(),
+      hasKey: Boolean(activeKey(settings)),
+      hasRecorder: mediaRecorderSupported(),
+    }));
+    document.getElementById('draft')?.focus();
+  };
   try {
     recognizer = startBrowserRecognition({
+      onStart: () => {
+        started = true;
+        window.clearTimeout(watchdog);
+      },
       onPartial: (text) => setLive(text),
       onError: (code) => {
-        if (code === 'aborted' || code === 'no-speech') return;
-        if (code === 'not-allowed') {
+        if (code === 'aborted') return;
+        if (code === 'no-speech') {
           cancelListen = true;
-          setStatus('Brak mikrofonu. Zezwól Safari albo wpisz zdanie.');
+          showProblem(recognitionProblem('no-speech'));
           return;
         }
-        ui.recognitionBroken = true;
-        cancelListen = true;
-        setStatus('Dyktowanie stanęło. Następnym razem nagram dźwięk.');
+        fail(code);
       },
       onEnd: (text) => {
+        window.clearTimeout(watchdog);
         recognizer = null;
         const heard = (text || ui.live || '').trim();
         ui.listening = false;
         paintListen();
         setLive('');
-        if (cancelListen) {
+        if (cancelListen || ui.error) {
           cancelListen = false;
-          setStatus(pathLabel(inputPath()));
+          return;
+        }
+        if (!started) {
+          fail('no-start');
           return;
         }
         onHeard(heard);
       },
     });
+    watchdog = window.setTimeout(() => {
+      if (!started && ui.listening) fail('no-start');
+    }, 2500);
   } catch {
-    ui.listening = false;
-    ui.recognitionBroken = true;
-    paintListen();
-    if (inputPath() === 'record') startRecording();
-    else setStatus('Dyktowanie niedostępne. Wpisz zdanie.');
+    fail('no-recognition');
   }
+}
+
+function openRecorder(stream) {
+  const ios = isIos();
+  const detected = pickRecorderMime((type) => {
+    try {
+      return MediaRecorder.isTypeSupported(type);
+    } catch {
+      return false;
+    }
+  }, { ios });
+  const attempts = [];
+  if (detected) attempts.push(detected);
+  if (ios && detected !== 'audio/mp4') attempts.push('audio/mp4');
+  attempts.push('');
+  let lastError = null;
+  for (const type of attempts) {
+    try {
+      const rec = type ? new MediaRecorder(stream, { mimeType: type }) : new MediaRecorder(stream);
+      return { recorder: rec, mime: type || rec.mimeType || (ios ? 'audio/mp4' : '') };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('recorder');
 }
 
 async function startRecording() {
@@ -1013,8 +1211,9 @@ async function startRecording() {
     recorderStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
     });
-    const mime = pickRecorderMime((type) => MediaRecorder.isTypeSupported(type));
-    recorder = mime ? new MediaRecorder(recorderStream, { mimeType: mime }) : new MediaRecorder(recorderStream);
+    const opened = openRecorder(recorderStream);
+    recorder = opened.recorder;
+    const mime = opened.mime;
     recorderChunks = [];
     recorder.addEventListener('dataavailable', (event) => {
       if (event.data && event.data.size) recorderChunks.push(event.data);
@@ -1027,7 +1226,11 @@ async function startRecording() {
       paintListen();
       if (cancelListen) {
         cancelListen = false;
-        setStatus(pathLabel(inputPath()));
+        if (!ui.error) setStatus(pathLabel(inputPath()));
+        return;
+      }
+      if (blob.size < 64) {
+        showProblem('Nagranie jest puste. Mów sekundę dłużej i stuknij Stop, albo wpisz zdanie.');
         return;
       }
       transcribeBlob(blob, type);
@@ -1038,7 +1241,10 @@ async function startRecording() {
     paintListen();
     cleanupStream();
     const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
-    setStatus(denied ? 'Brak mikrofonu. Zezwól Safari albo wpisz zdanie.' : 'Nie udało się nagrać. Wpisz zdanie.');
+    showProblem(denied
+      ? 'Brak zgody na mikrofon. Zezwól: Ustawienia → Safari → Mikrofon (albo Ustawienia → Elektryk EN, gdy aplikacja jest na ekranie początkowym). Możesz też wpisać zdanie.'
+      : 'Nie udało się nagrać. Wpisz zdanie na dole.');
+    document.getElementById('draft')?.focus();
   }
 }
 
@@ -1085,7 +1291,13 @@ function abandonRecognizer() {
 
 async function transcribeBlob(blob, type) {
   if (!activeKey(settings)) {
-    setStatus('Nagranie umiem wysłać tylko z kluczem API. Wpisz zdanie albo dodaj klucz.');
+    showProblem('Nagranie mogę wysłać tylko z kluczem API. Wpisz zdanie na dole albo dodaj klucz: Ustawienia → Klucz API.');
+    document.getElementById('draft')?.focus();
+    return;
+  }
+  if (settings.provider === 'xai' && ui.providerSpeech === false) {
+    showProblem('xAI nie przyjął nagrania. Wpisz zdanie. Odpowiedź i tak przeczytam głosem iPhone’a.');
+    document.getElementById('draft')?.focus();
     return;
   }
   ui.busy = true;
@@ -1096,16 +1308,18 @@ async function transcribeBlob(blob, type) {
       provider: settings.provider,
       apiKey: activeKey(settings),
       audio: blob,
-      mime: type,
-      filename: `speech.${extensionForMime(type)}`,
+      mime: type || 'audio/mp4',
+      filename: `speech.${extensionForMime(type || 'audio/mp4')}`,
     });
     setStatus('');
     await onHeard(text);
   } catch (err) {
-    ui.error = polishError(err);
-    setStatus('');
-    const node = document.querySelector('.screen');
-    if (node && !node.querySelector('.error')) node.insertBefore(el('p', 'error', ui.error), node.querySelector('.dock'));
+    if (err instanceof ProviderError && (err.status === 404 || err.status === 405)) ui.providerSpeech = false;
+    const message = err instanceof ProviderError && (err.status === 404 || err.status === 405)
+      ? 'Ten dostawca nie ma rozpoznawania mowy. Wpisz zdanie. Głos odpowiedzi przeczytam głosem iPhone’a.'
+      : polishError(err);
+    showProblem(message);
+    document.getElementById('draft')?.focus();
   } finally {
     ui.busy = false;
     paintListen();
@@ -1143,7 +1357,7 @@ async function submitText(text, opts = {}) {
     at: Date.now(),
   });
   ui.busy = true;
-  ui.error = '';
+  clearProblem();
   paintListen();
   setStatus(activeKey(settings) ? 'Myślę…' : 'Tryb próbny…');
   try {
@@ -1173,12 +1387,7 @@ async function submitText(text, opts = {}) {
       setStatus(pathLabel(inputPath()));
     }
   } catch (err) {
-    ui.error = polishError(err);
-    setStatus('');
-    const screen = document.querySelector('.screen');
-    if (screen && !screen.querySelector('.error')) {
-      screen.insertBefore(el('p', 'error', ui.error), screen.querySelector('.dock'));
-    }
+    showProblem(polishError(err));
   } finally {
     ui.busy = false;
     paintListen();
@@ -1313,7 +1522,7 @@ async function speak(text, { slow = false } = {}) {
   paintListen();
   try {
     const useProvider = settings.voiceMode === 'provider' && activeKey(settings);
-    if (useProvider) {
+    if (useProvider && ui.providerSpeech !== false) {
       try {
         const blob = await synthesizeSpeech({
           provider: settings.provider,
@@ -1323,8 +1532,9 @@ async function speak(text, { slow = false } = {}) {
         });
         await playBlob(blob);
         return;
-      } catch {
-        setStatus('Głos dostawcy niedostępny. Czytam głosem telefonu.');
+      } catch (err) {
+        if (err instanceof ProviderError && (err.status === 404 || err.status === 405)) ui.providerSpeech = false;
+        setStatus('Głos dostawcy niedostępny. Czytam głosem iPhone’a.');
       }
     }
     await speakBrowser(line, { lang: 'en-GB', rate: slow ? 0.9 : 0.96 });
@@ -1338,6 +1548,13 @@ async function speak(text, { slow = false } = {}) {
 
 async function playBlob(blob) {
   await waitForAudioUnlock();
+  try {
+    await playWithWebAudio(blob);
+    return;
+  } catch {
+    /* Web Audio keeps dictation alive on iOS. The <audio> tag is only a fallback. */
+  }
+  ui.recognitionBroken = true;
   if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
   currentObjectUrl = URL.createObjectURL(blob);
   audioEl.src = currentObjectUrl;

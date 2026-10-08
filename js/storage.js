@@ -2,6 +2,7 @@ export const KEYS = {
   settings: 'ae.settings.v1',
   cards: 'ae.cards.v1',
   messages: 'ae.messages.v1',
+  sessions: 'ae.sessions.v1',
   installDismissed: 'ae.installDismissed.v1',
 };
 
@@ -18,6 +19,11 @@ export const DEFAULT_SETTINGS = {
   openaiVoice: 'coral',
   xaiVoice: 'eve',
   inputMode: 'auto',
+  sendMode: 'auto',
+  handsFree: false,
+  dailyGoal: 5,
+  fontScale: 'md',
+  heardSam: '',
 };
 
 const LEVELS = ['A2', 'B1', 'B2', 'C1'];
@@ -62,6 +68,12 @@ export function loadSettings(store) {
   merged.confirmBeforeSend = Boolean(merged.confirmBeforeSend);
   merged.openaiVoice = String(merged.openaiVoice || 'coral');
   merged.xaiVoice = String(merged.xaiVoice || 'eve');
+  if (merged.sendMode !== 'manual') merged.sendMode = 'auto';
+  merged.handsFree = Boolean(merged.handsFree);
+  const goal = Number(merged.dailyGoal);
+  merged.dailyGoal = goal === 3 || goal === 5 || goal === 8 ? goal : 5;
+  if (!['sm', 'md', 'lg'].includes(merged.fontScale)) merged.fontScale = 'md';
+  if (merged.heardSam !== 'yes' && merged.heardSam !== 'no') merged.heardSam = '';
   return merged;
 }
 
@@ -88,10 +100,20 @@ export function saveMessages(store, messages) {
   store.setItem(KEYS.messages, JSON.stringify(trimmed));
 }
 
+export function loadSessions(store) {
+  const sessions = readJson(store, KEYS.sessions, []);
+  return Array.isArray(sessions) ? sessions : [];
+}
+
+export function saveSessions(store, sessions) {
+  store.setItem(KEYS.sessions, JSON.stringify((sessions || []).slice(0, 40)));
+}
+
 export function clearAll(store) {
   store.removeItem(KEYS.settings);
   store.removeItem(KEYS.cards);
   store.removeItem(KEYS.messages);
+  store.removeItem(KEYS.sessions);
 }
 
 export function activeKey(settings) {

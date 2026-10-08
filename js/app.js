@@ -1,7 +1,8 @@
+import { scoreRing, scenarioArt, welcomeArt } from './art.js';
 import { SEED } from './seed.js';
 import { dueCards, ensureSeed, removeCard, reviewCard, searchCards, upsertPhrase } from './srs.js';
-import { activeKey, clearAll, loadCards, loadMessages, loadSettings, saveCards, saveMessages, saveSettings } from './storage.js';
-import { TOPICS, buildSystemPrompt, messagesForApi, splitHighlights, topicKickoff } from './tutor.js';
+import { activeKey, clearAll, KEYS, loadCards, loadMessages, loadSessions, loadSettings, saveCards, saveMessages, saveSessions, saveSettings } from './storage.js';
+import { SCENARIOS, TOPICS, buildSystemPrompt, messagesForApi, splitHighlights, topicKickoff } from './tutor.js';
 import { PROVIDERS, ProviderError, activeModel, chatComplete, synthesizeSpeech, transcribeAudio, verifyKey } from './providers.js';
 import {
   describeInputPath,
@@ -14,6 +15,7 @@ import {
   pickRecorderMime,
   playWithWebAudio,
   recognitionProblem,
+  sharedAudioContext,
   speakBrowser,
   startBrowserRecognition,
   stopBrowserSpeech,
@@ -21,6 +23,7 @@ import {
   waitForAudioUnlock,
 } from './speech.js';
 import { demoReply } from './demo.js';
+import { buildSessionReport, comparePronunciation, garbleTurn, goalProgress, looksGarbled, weekCounts } from './quality.js';
 
 const store = window.localStorage;
 const audioEl = document.getElementById('voice');
@@ -35,6 +38,7 @@ let seeded = ensureSeed(loadCards(store), SEED);
 let cards = seeded.cards;
 if (seeded.added) saveCards(store, cards);
 let messages = loadMessages(store);
+let sessions = loadSessions(store);
 
 const ui = {
   route: routeFromHash(),
@@ -54,6 +58,15 @@ const ui = {
   installEvent: null,
   speaking: false,
   providerSpeech: true,
+  pending: '',
+  holdReview: false,
+  heardPrompt: false,
+  offline: typeof navigator !== 'undefined' && navigator.onLine === false,
+  onboard: !store.getItem(KEYS.settings),
+  onboardStep: 0,
+  scenario: null,
+  openReport: '',
+  drill: null,
 };
 
 let recognizer = null;
@@ -64,21 +77,15 @@ let cancelListen = false;
 let toastTimer = 0;
 let currentObjectUrl = '';
 let speakGen = 0;
+let silenceTimer = 0;
+let silenceFrame = 0;
+let autoSendTimer = 0;
+let recordCap = 0;
+let handsFreeArmed = false;
 
 const PRACTICE_KEY = 'ae.practice.v1';
 const AVATAR_SVG = '<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="32" fill="#0c2340"/><path d="M10 50c4-14 14-18 22-18s18 4 22 18" fill="#1d4e89"/><circle cx="32" cy="30" r="10" fill="#f0c7a8"/><path d="M14 26c2-14 12-20 18-20s16 6 18 20c-5 2-10 4-18 4s-13-2-18-4z" fill="#e4c36a"/><rect x="18" y="24" width="28" height="5" rx="2" fill="#c8102e"/></svg>';
-const TOPIC_ICONS = {
-  site: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 20V9l9-6 9 6v11h-6v-6H9v6H3z"/></svg>',
-  install: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 3h3v6h2V3h3v8h3v2H5v-2h3V3zm-2 12h12v2H6v-2zm2 4h8v2H8v-2z"/></svg>',
-  test: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h10v8a5 5 0 0 1-10 0V4zm12 1h4v2h-2v9a4 4 0 1 1-2-3.46V5z"/></svg>',
-  people: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm8 1a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5zM2 19c.4-3 2.6-4.5 6-4.5S13.6 16 14 19H2zm12 .5c.2-1.6 1-2.9 2.4-3.7 2.2.4 3.6 1.6 4.1 3.7H14z"/></svg>',
-  hse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2 4 5v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V5l-8-3zm-1 13-3-3 1.4-1.4L11 12.2l3.6-3.6L16 10l-5 5z"/></svg>',
-  job: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 4h6v2h5v14H4V6h5V4zm2 2v0h2V4h-2v2z"/></svg>',
-  chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16v11H8l-4 4V4z"/></svg>',
-  free: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M13 2 4 14h7l-1 8 10-14h-7l0-6z"/></svg>',
-};
-
-const TITLES = { talk: 'Rozmowa', cards: 'Słówka', settings: 'Ustawienia' };
+const TITLES = { talk: 'Rozmowa', cards: 'Słówka', settings: 'Ustawienia', history: 'Raporty' };
 const STARTERS = [
   'I am electrician and I work in Norway since two years.',
   'Yesterday I change the consumer unit.',
@@ -89,13 +96,49 @@ function routeFromHash() {
   const hash = location.hash.replace('#', '');
   if (hash === '/slowka') return 'cards';
   if (hash === '/ustawienia') return 'settings';
+  if (hash === '/historia') return 'history';
   return 'talk';
 }
 
 function hashFor(route) {
   if (route === 'cards') return '#/slowka';
   if (route === 'settings') return '#/ustawienia';
+  if (route === 'history') return '#/historia';
   return '#/';
+}
+
+function autoSendEnabled() {
+  return settings.sendMode !== 'manual' && !settings.confirmBeforeSend;
+}
+
+function buzz(pattern = 12) {
+  try {
+    if (navigator.userActivation && navigator.userActivation.isActive === false) return;
+    if (typeof navigator.vibrate === 'function') navigator.vibrate(pattern);
+  } catch {
+    /* iOS treats this as a no-op */
+  }
+}
+
+function clearSilence() {
+  window.clearTimeout(silenceTimer);
+  silenceTimer = 0;
+  if (silenceFrame) window.cancelAnimationFrame(silenceFrame);
+  silenceFrame = 0;
+  window.clearTimeout(recordCap);
+  recordCap = 0;
+}
+
+function cancelAutoSend() {
+  window.clearTimeout(autoSendTimer);
+  autoSendTimer = 0;
+}
+
+function idleStatus() {
+  const path = inputPath();
+  if (path === 'type') return 'Wpisz zdanie po angielsku i stuknij strzałkę.';
+  if (!autoSendEnabled()) return 'Stuknij Mów, a potem Stop.';
+  return 'Stuknij Mów. Gdy zamilkniesz, pokażę tekst i wyślę.';
 }
 
 function uid() {
@@ -195,7 +238,541 @@ function el(tag, className, text) {
   return node;
 }
 
+function shouldShowHeard() {
+  if (!settings.autoSpeak) return false;
+  if (settings.heardSam === 'yes') return false;
+  return ui.heardPrompt || settings.heardSam === 'no';
+}
+
+function heardBanner() {
+  const box = el('div', 'heard');
+  box.id = 'heard-banner';
+  box.setAttribute('role', 'status');
+  box.append(el('p', null, settings.heardSam === 'no'
+    ? 'Sama nie było słychać. Na iPhonie wyłącz tryb cichy — przełącznik z boku. Safari go nie widzi.'
+    : 'Słyszysz Sama? Jeśli nie, wyłącz tryb cichy. Na iPhonie to przełącznik z boku — Safari go nie widzi.'));
+  const row = el('div', 'heard-actions');
+  const yes = el('button', 'send', 'Słyszę');
+  yes.type = 'button';
+  yes.addEventListener('click', () => {
+    settings.heardSam = 'yes';
+    ui.heardPrompt = false;
+    saveSettings(store, settings);
+    render();
+  });
+  const no = el('button', 'side-btn', 'Nie słyszę');
+  no.type = 'button';
+  no.addEventListener('click', () => {
+    settings.heardSam = 'no';
+    ui.heardPrompt = true;
+    saveSettings(store, settings);
+    render();
+  });
+  row.append(yes, no);
+  box.append(row);
+  return box;
+}
+
+function offlineBanner() {
+  return el('p', 'banner', 'Jesteś offline. Słówka i raporty są na telefonie. Rozmowa z modelem poczeka na sieć. Tryb próbny działa.');
+}
+
+function goalStrip() {
+  const progress = goalProgress(messages, settings.dailyGoal);
+  const box = el('div', 'goal');
+  const top = el('div', 'goal-top');
+  top.append(el('strong', null, progress.met ? 'Cel na dziś zrobiony.' : `Dziś ${progress.done} z ${progress.goal}`));
+  top.append(el('span', null, `Seria ${streakCount()}`));
+  box.append(top);
+  const meter = el('div', 'meter');
+  const fill = el('span');
+  fill.style.width = `${Math.round(progress.ratio * 100)}%`;
+  meter.append(fill);
+  box.append(meter);
+  return box;
+}
+
+function weekChart() {
+  const counts = weekCounts(messages);
+  const max = Math.max(1, ...counts.map((item) => item.count));
+  const chart = el('div', 'week');
+  for (const item of counts) {
+    const col = el('div', 'week-col');
+    const bar = el('span', 'bar');
+    bar.style.height = `${Math.max(8, Math.round((item.count / max) * 100))}%`;
+    if (!item.count) bar.classList.add('is-empty');
+    col.append(bar, el('small', null, item.label));
+    col.title = `${item.label}: ${item.count}`;
+    chart.append(col);
+  }
+  return chart;
+}
+
+function scenarioGrid() {
+  const grid = el('div', 'scenario-grid');
+  for (const scenario of SCENARIOS) {
+    const button = el('button', 'scenario-card');
+    button.type = 'button';
+    const art = el('span', 'scenario-art');
+    art.innerHTML = scenarioArt(scenario.id);
+    button.append(art, el('strong', null, scenario.pl), el('span', null, scenario.hint));
+    button.addEventListener('click', () => startScenario(scenario));
+    grid.append(button);
+  }
+  return grid;
+}
+
+function reviewBar() {
+  const box = el('div', 'review');
+  box.id = 'review';
+  if (!ui.holdReview) box.append(el('div', 'review-wait'));
+  const caption = el('p', 'review-label', ui.holdReview ? 'Usłyszałem. Wyślij albo popraw.' : 'Usłyszałem. Za chwilę wyślę.');
+  const field = document.createElement('textarea');
+  field.id = 'review-text';
+  field.rows = 2;
+  field.value = ui.pending;
+  field.setAttribute('aria-label', 'Rozpoznany tekst');
+  field.addEventListener('input', () => {
+    ui.pending = field.value;
+    ui.holdReview = true;
+    cancelAutoSend();
+    box.querySelector('.review-wait')?.remove();
+    caption.textContent = 'Poprawiasz. Stuknij Wyślij, gdy będzie dobrze.';
+    setStatus('Poprawiasz tekst. Stuknij Wyślij.');
+  });
+  const send = el('button', 'send wide', 'Wyślij');
+  send.type = 'button';
+  send.id = 'review-send';
+  send.addEventListener('click', () => {
+    const text = field.value || ui.pending;
+    cancelAutoSend();
+    ui.pending = '';
+    submitText(text);
+  });
+  const alt = el('div', 'review-alt');
+  const edit = el('button', 'text-btn', 'Popraw');
+  edit.type = 'button';
+  edit.addEventListener('click', () => {
+    ui.holdReview = true;
+    cancelAutoSend();
+    box.querySelector('.review-wait')?.remove();
+    caption.textContent = 'Popraw tekst i stuknij Wyślij.';
+    field.focus();
+  });
+  const again = el('button', 'text-btn', 'Jeszcze raz');
+  again.type = 'button';
+  again.addEventListener('click', () => {
+    cancelAutoSend();
+    ui.pending = '';
+    ui.holdReview = false;
+    render();
+    onTalk();
+  });
+  alt.append(edit, again);
+  box.append(caption, field, send, alt);
+  return box;
+}
+
+function armAutoSend() {
+  cancelAutoSend();
+  const started = Date.now();
+  const wait = 2200;
+  const tick = () => {
+    if (!ui.pending || ui.holdReview) return;
+    const left = wait - (Date.now() - started);
+    const bar = document.querySelector('.review-wait');
+    if (bar) bar.style.setProperty('--wait', String(Math.max(0, Math.min(1, 1 - left / wait))));
+    if (left <= 0) {
+      const text = (document.getElementById('review-text')?.value || ui.pending).trim();
+      ui.pending = '';
+      submitText(text);
+      return;
+    }
+    autoSendTimer = window.setTimeout(tick, 80);
+  };
+  tick();
+}
+
+function watchRecorderSilence(stream) {
+  try {
+    const ctx = sharedAudioContext();
+    if (!ctx || !stream) return;
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.fftSize);
+    let quietSince = 0;
+    let heardVoice = false;
+    const loop = () => {
+      if (!ui.listening || !recorder) return;
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i += 1) {
+        const sample = (data[i] - 128) / 128;
+        sum += sample * sample;
+      }
+      const rms = Math.sqrt(sum / data.length);
+      const now = performance.now();
+      if (rms > 0.025) {
+        heardVoice = true;
+        quietSince = 0;
+        if (!ui.live) setLive('Słyszę Cię…');
+      } else if (heardVoice) {
+        if (!quietSince) quietSince = now;
+        else if (now - quietSince > 1300) {
+          stopListening(false);
+          return;
+        }
+      }
+      silenceFrame = window.requestAnimationFrame(loop);
+    };
+    silenceFrame = window.requestAnimationFrame(loop);
+  } catch {
+    /* Stop still ends the recording if the analyser cannot start. */
+  }
+}
+
+async function submitGarbled(text) {
+  if (ui.busy) return;
+  markPractice();
+  showMessage({ id: uid(), role: 'user', text, at: Date.now() });
+  const turn = garbleTurn();
+  showMessage({
+    id: uid(),
+    role: 'assistant',
+    text: turn.reply,
+    corrections: [],
+    phrases: [],
+    hint_pl: 'To brzmiało jak pomyłka dyktowania. Powiedz jeszcze raz, wolniej, jednym zdaniem.',
+    at: Date.now(),
+  });
+  if (settings.autoSpeak) {
+    try {
+      await speak(turn.reply);
+      if (settings.heardSam !== 'yes') ui.heardPrompt = true;
+    } catch {
+      setStatus('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie.');
+    }
+  }
+  setStatus('Powiedz to jeszcze raz albo popraw tekst na dole.');
+  if (ui.route === 'talk') render();
+}
+
+function maybeHandsFree() {
+  if (!settings.handsFree || !handsFreeArmed) return;
+  window.setTimeout(() => {
+    if (!handsFreeArmed || ui.busy || ui.listening || ui.pending || ui.route !== 'talk' || ui.onboard || ui.error) {
+      handsFreeArmed = false;
+      return;
+    }
+    onTalk();
+  }, 450);
+}
+
+function finishSession() {
+  const report = buildSessionReport({ messages, scenario: ui.scenario, level: settings.level });
+  if (!report.turns) {
+    showProblem('Najpierw powiedz chociaż jedno zdanie. Potem stuknij Raport.');
+    return;
+  }
+  sessions = [report, ...sessions.filter((item) => item.id !== report.id)].slice(0, 40);
+  saveSessions(store, sessions);
+  ui.openReport = report.id;
+  showToast('Raport zapisany.');
+  if (location.hash !== '#/historia') location.hash = '#/historia';
+  else {
+    ui.route = 'history';
+    render();
+  }
+}
+
+async function startScenario(scenario) {
+  if (ui.busy) return;
+  ui.scenario = scenario;
+  unlockAudio(audioEl);
+  stopSpeaking();
+  showMessage({
+    id: uid(),
+    role: 'note',
+    text: `${scenario.pl}. Cel: ${scenario.goal}`,
+    at: Date.now(),
+  });
+  await submitText(topicKickoff(scenario), { hidden: true, topicId: scenario.id });
+}
+
+function renderOnboarding() {
+  const screen = el('section', 'screen onboard');
+  const art = el('div', 'onboard-art');
+  art.innerHTML = welcomeArt();
+  const sheet = el('div', 'onboard-sheet');
+  const step = ui.onboardStep;
+  sheet.append(el('p', 'dots', `${step + 1} z 3`));
+  if (step === 0) {
+    sheet.append(el('h2', null, 'Na jakim jesteś poziomie?'));
+    sheet.append(el('p', null, 'Sam dopasuje zdania. Zawsze możesz to zmienić u góry.'));
+    const levels = el('div', 'segment');
+    for (const level of ['A2', 'B1', 'B2', 'C1']) {
+      const button = el('button', null, level);
+      button.type = 'button';
+      button.setAttribute('aria-pressed', settings.level === level ? 'true' : 'false');
+      button.addEventListener('click', () => {
+        settings.level = level;
+        levelSelect.value = level;
+        render();
+      });
+      levels.append(button);
+    }
+    sheet.append(levels);
+    const next = el('button', 'send wide', 'Dalej');
+    next.type = 'button';
+    next.addEventListener('click', () => {
+      ui.onboardStep = 1;
+      render();
+    });
+    sheet.append(next);
+  } else if (step === 1) {
+    sheet.append(el('h2', null, 'Skąd brać odpowiedzi?'));
+    sheet.append(el('p', null, 'Klucz zostaje tylko w tym telefonie. Bez klucza jest tryb próbny.'));
+    const provider = document.createElement('select');
+    provider.id = 'onboard-provider';
+    for (const spec of Object.values(PROVIDERS)) {
+      const option = el('option', null, spec.label);
+      option.value = spec.id;
+      provider.append(option);
+    }
+    provider.value = settings.provider;
+    const field = el('label', 'field', 'Dostawca');
+    field.append(provider);
+    const key = document.createElement('input');
+    key.id = 'onboard-key';
+    key.type = 'password';
+    key.autocomplete = 'off';
+    key.placeholder = 'Klucz, jeśli już masz';
+    const keyField = el('label', 'field', 'Klucz (możesz pominąć)');
+    keyField.append(key);
+    const next = el('button', 'send wide', 'Dalej');
+    next.type = 'button';
+    next.addEventListener('click', () => {
+      settings.provider = provider.value;
+      rememberOnboardKey(key.value);
+      ui.onboardStep = 2;
+      render();
+    });
+    sheet.append(field, keyField, next);
+  } else {
+    sheet.append(el('h2', null, 'Żeby słyszeć Sama'));
+    sheet.append(el('p', null, 'Jeśli iPhone jest wyciszony, głosu nie będzie. Wyłącz tryb cichy — przełącznik z boku. Potem stuknij czerwony przycisk i mów.'));
+    const next = el('button', 'send wide', 'Zaczynamy');
+    next.type = 'button';
+    next.id = 'onboard-start';
+    next.addEventListener('click', finishOnboard);
+    sheet.append(next);
+  }
+  const skip = el('button', 'text-btn onboard-skip', 'Pomiń');
+  skip.type = 'button';
+  skip.id = 'onboard-skip';
+  skip.addEventListener('click', finishOnboard);
+  sheet.append(skip);
+  screen.append(art, sheet);
+  return screen;
+}
+
+function rememberOnboardKey(value) {
+  const key = String(value || '').trim();
+  if (!key) return;
+  if (settings.provider === 'xai') settings.xaiKey = key;
+  else settings.openaiKey = key;
+}
+
+function finishOnboard() {
+  const provider = document.getElementById('onboard-provider');
+  if (provider?.value) settings.provider = provider.value;
+  rememberOnboardKey(document.getElementById('onboard-key')?.value);
+  saveSettings(store, settings);
+  ui.onboard = false;
+  render();
+}
+
+function renderHistory() {
+  const screen = el('section', 'screen');
+  screen.dataset.screen = 'history';
+  const scroll = el('div', 'scroll');
+  if (ui.offline) scroll.append(offlineBanner());
+  const back = el('button', 'text-link', '← Rozmowa');
+  back.type = 'button';
+  back.addEventListener('click', () => {
+    location.hash = '#/';
+  });
+  scroll.append(back, weekChart());
+  const open = sessions.find((item) => item.id === ui.openReport);
+  if (open) scroll.append(reportCard(open));
+  if (!sessions.length) {
+    const done = el('div', 'done');
+    done.append(el('h2', null, 'Tu będą raporty.'));
+    done.append(el('p', null, 'Porozmawiaj, a na końcu stuknij Raport. Zostanie wynik, poprawki i nowe słowa.'));
+    const go = el('button', 'send', 'Do rozmowy');
+    go.type = 'button';
+    go.addEventListener('click', () => {
+      location.hash = '#/';
+    });
+    done.append(go);
+    scroll.append(done);
+  } else {
+    scroll.append(el('h2', 'history-title', 'Ostatnie sesje'));
+    for (const report of sessions) {
+      if (open && report.id === open.id) continue;
+      const button = el('button', 'history-item');
+      button.type = 'button';
+      button.append(
+        el('strong', null, report.scenarioPl || 'Rozmowa'),
+        el('span', null, `${report.score}/100 · ${report.turns} ${report.turns === 1 ? 'zdanie' : 'zdań'}`),
+      );
+      button.addEventListener('click', () => {
+        ui.openReport = report.id;
+        render();
+      });
+      scroll.append(button);
+    }
+  }
+  screen.append(scroll);
+  return screen;
+}
+
+function reportCard(report) {
+  const card = el('article', 'report');
+  const head = el('div', 'report-head');
+  const ring = el('div', 'ring-wrap');
+  ring.innerHTML = scoreRing(report.score);
+  const titles = el('div');
+  titles.append(el('h2', null, report.scenarioPl || 'Rozmowa'));
+  if (report.goal) titles.append(el('p', null, report.goal));
+  head.append(ring, titles);
+  card.append(head);
+  card.append(el('p', 'section-label', 'Co poszło dobrze'));
+  for (const line of report.wentWell || []) card.append(el('p', 'report-line', line));
+  if (report.corrections?.length) {
+    card.append(el('p', 'section-label', 'Najważniejsze poprawki'));
+    for (const fix of report.corrections) {
+      const line = el('p', 'report-line');
+      const better = el('span', null, fix.better);
+      better.lang = 'en-GB';
+      line.append(better);
+      if (fix.why_pl) line.append(el('small', null, fix.why_pl));
+      card.append(line);
+    }
+  }
+  if (report.words?.length) {
+    card.append(el('p', 'section-label', 'Nowe słowa'));
+    const row = el('div', 'phrases');
+    for (const word of report.words) {
+      const chip = el('span', 'chip', word.en);
+      chip.lang = 'en-GB';
+      row.append(chip);
+    }
+    card.append(row);
+  }
+  const again = el('button', 'send wide', 'Nowa rozmowa');
+  again.type = 'button';
+  again.addEventListener('click', () => {
+    ui.openReport = '';
+    newChat();
+  });
+  card.append(again);
+  return card;
+}
+
+function drillNote() {
+  const note = el('p', `drill drill-${ui.drill?.grade || 'wait'}`, ui.drill?.note || '');
+  note.id = 'drill-note';
+  return note;
+}
+
+function paintDrill() {
+  const existing = document.getElementById('drill-note');
+  if (existing) existing.replaceWith(drillNote());
+}
+
+async function practisePhrase(card) {
+  if (ui.busy || ui.listening) return;
+  ui.busy = true;
+  paintListen();
+  ui.drill = { id: card.id, note: 'Słuchaj wzoru…', grade: '' };
+  if (!document.getElementById('drill-note')) render();
+  else paintDrill();
+  try {
+    await speak(card.en, { slow: true });
+    if (!getRecognitionCtor() || ui.recognitionBroken) {
+      ui.drill = { id: card.id, note: 'Posłuchaj wzoru i powtórz na głos. Gdy dyktowanie działa, porównam to, co usłyszę.', grade: '' };
+      paintDrill();
+      return;
+    }
+    ui.drill = { id: card.id, note: 'Teraz ty. Powiedz to wyrażenie.', grade: '' };
+    paintDrill();
+    const heard = await listenOnce();
+    const result = comparePronunciation(card.en, heard);
+    ui.drill = { id: card.id, note: `${result.note_pl} Usłyszałem: ${heard}`, grade: result.grade };
+    buzz(result.grade === 'good' ? 16 : [8, 40, 8]);
+    paintDrill();
+  } catch {
+    ui.drill = { id: card.id, note: 'Nie złapałem głosu. Stuknij Powiedz to jeszcze raz.', grade: 'again' };
+    paintDrill();
+  } finally {
+    ui.busy = false;
+    paintListen();
+  }
+}
+
+function listenOnce() {
+  return new Promise((resolve, reject) => {
+    let started = false;
+    let rec;
+    const timer = window.setTimeout(() => {
+      try { rec?.stop(); } catch { /* ignore */ }
+    }, 7000);
+    const watchdog = window.setTimeout(() => {
+      if (!started) {
+        window.clearTimeout(timer);
+        try { rec?.abort(); } catch { /* ignore */ }
+        reject(new Error('no-start'));
+      }
+    }, 2500);
+    try {
+      rec = startBrowserRecognition({
+        continuous: false,
+        onStart: () => {
+          started = true;
+          window.clearTimeout(watchdog);
+        },
+        onPartial: (text) => {
+          if (!ui.drill) return;
+          ui.drill.note = text || 'Słucham…';
+          paintDrill();
+        },
+        onError: (code) => {
+          if (code === 'aborted' || code === 'no-speech') return;
+          window.clearTimeout(timer);
+          window.clearTimeout(watchdog);
+          reject(new Error(code));
+        },
+        onEnd: (text) => {
+          window.clearTimeout(timer);
+          window.clearTimeout(watchdog);
+          const heard = String(text || '').trim();
+          if (!heard) reject(new Error('empty'));
+          else resolve(heard);
+        },
+      });
+    } catch (err) {
+      window.clearTimeout(timer);
+      window.clearTimeout(watchdog);
+      reject(err);
+    }
+  });
+}
+
 function boot() {
+  document.documentElement.dataset.font = settings.fontScale || 'md';
   levelSelect.value = settings.level;
   levelSelect.addEventListener('change', () => {
     settings.level = levelSelect.value;
@@ -242,12 +819,25 @@ function boot() {
     });
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
+  window.addEventListener('online', () => {
+    ui.offline = false;
+    render();
+  });
+  window.addEventListener('offline', () => {
+    ui.offline = true;
+    render();
+  });
   render();
 }
 
 function render() {
-  title.textContent = TITLES[ui.route];
+  document.documentElement.dataset.font = settings.fontScale || 'md';
+  title.textContent = ui.onboard ? 'Start' : (TITLES[ui.route] || 'Rozmowa');
   levelSelect.value = settings.level;
+  const nav = document.querySelector('.nav');
+  if (nav) nav.hidden = ui.onboard;
+  const levelWrap = document.querySelector('.level');
+  if (levelWrap) levelWrap.hidden = ui.onboard;
   document.querySelectorAll('.nav button').forEach((button) => {
     button.setAttribute('aria-current', button.dataset.route === ui.route ? 'page' : 'false');
   });
@@ -255,8 +845,13 @@ function render() {
   dueBadge.hidden = due === 0;
   dueBadge.textContent = due > 99 ? '99+' : String(due);
   main.replaceChildren();
+  if (ui.onboard) {
+    main.append(renderOnboarding());
+    return;
+  }
   if (ui.route === 'talk') main.append(renderTalk());
   else if (ui.route === 'cards') main.append(renderCards());
+  else if (ui.route === 'history') main.append(renderHistory());
   else main.append(renderSettings());
 }
 
@@ -291,15 +886,20 @@ function clearProblem() {
 function renderTalk() {
   const screen = el('section', 'screen');
   screen.dataset.screen = 'talk';
+  if (ui.offline) screen.append(offlineBanner());
   if (!activeKey(settings)) {
     const banner = el('p', 'banner');
     banner.append(el('strong', null, 'Tryb próbny. '));
-    banner.append('Bez klucza API odpowiadam z pamięci telefonu, nie z modelu. Pisz na dole albo dodaj klucz w Ustawieniach. Na iPhonie z ekranu początkowego mikrofon wymaga klucza.');
+    banner.append('Bez klucza odpowiadam z telefonu, nie z modelu. Pisz na dole albo dodaj klucz w Ustawieniach.');
     screen.append(banner);
   }
   const hasChat = messages.some((message) => !message.hidden);
   if (hasChat) {
     const topics = el('div', 'topics');
+    const report = el('button', 'chip-strong', 'Raport');
+    report.type = 'button';
+    report.addEventListener('click', finishSession);
+    topics.append(report);
     for (const topic of TOPICS) {
       const button = el('button', null, topic.pl);
       button.type = 'button';
@@ -324,11 +924,24 @@ function renderTalk() {
   screen.append(transcript);
 
   if (ui.error) screen.append(el('p', 'error', ui.error));
+  if (shouldShowHeard()) screen.append(heardBanner());
 
   const dock = el('div', 'dock');
+  if (ui.pending) dock.append(reviewBar());
   const live = el('p', 'live', ui.live);
   live.id = 'live';
   dock.append(live);
+  if (!ui.pending) dock.append(composerBlock(), talkBlock());
+  const status = el('p', 'path', ui.status || idleStatus());
+  status.id = 'status';
+  status.setAttribute('aria-live', 'polite');
+  dock.append(status);
+  screen.append(dock);
+  queueMicrotask(revealLatest);
+  return screen;
+}
+
+function composerBlock() {
   const composer = el('div', 'composer');
   const draft = document.createElement('textarea');
   draft.id = 'draft';
@@ -347,8 +960,10 @@ function renderTalk() {
   send.setAttribute('aria-label', 'Wyślij');
   send.addEventListener('click', sendDraft);
   composer.append(draft, send);
-  dock.append(composer);
+  return composer;
+}
 
+function talkBlock() {
   const row = el('div', 'talk-row');
   const cancel = el('button', 'side-btn', 'Anuluj');
   cancel.type = 'button';
@@ -368,14 +983,7 @@ function renderTalk() {
   talk.append(label);
   talk.addEventListener('click', onTalk);
   row.append(cancel, talk);
-  dock.append(row);
-  const status = el('p', 'path', ui.status || pathLabel(inputPath()));
-  status.id = 'status';
-  status.setAttribute('aria-live', 'polite');
-  dock.append(status);
-  screen.append(dock);
-  queueMicrotask(revealLatest);
-  return screen;
+  return row;
 }
 
 function emptyState() {
@@ -385,30 +993,24 @@ function emptyState() {
   hero.append(jackMark());
   hero.append(el('p', 'hero-kicker', greeting()));
   hero.append(el('h2', null, 'Mów, jak na budowie.'));
-  hero.append(el('p', null, 'Stuknij czerwony przycisk i powiedz coś po angielsku. Sam odpowie na głos, dopyta i poprawi tylko to, co brzmi nienaturalnie.'));
-  const learned = learnedCount();
-  const total = Math.max(cards.length, 1);
-  const meter = el('div', 'meter');
-  const fill = el('span');
-  fill.style.width = `${Math.round((learned / total) * 100)}%`;
-  meter.append(fill);
-  meter.setAttribute('aria-hidden', 'true');
-  hero.append(meter);
-  hero.append(el('p', 'meter-label', `${learned} z ${cards.length} haseł opanowanych`));
+  hero.append(el('p', null, 'Czerwony przycisk na dole. Powiedz zdanie po angielsku. Gdy zamilkniesz, pokażę tekst i wyślę.'));
   box.append(hero);
+  box.append(goalStrip());
+  box.append(el('p', 'section-label', 'Wybierz sytuację'));
+  box.append(scenarioGrid());
   box.append(statsRow());
-  box.append(el('p', 'section-label', 'Tematy'));
-  const grid = el('div', 'topic-grid');
-  for (const topic of TOPICS) {
-    const button = el('button', 'topic-card');
-    button.type = 'button';
-    const icon = el('span', 'topic-ico');
-    icon.innerHTML = TOPIC_ICONS[topic.id] || TOPIC_ICONS.free;
-    button.append(icon, el('span', null, topic.pl));
-    button.addEventListener('click', () => startTopic(topic));
-    grid.append(button);
-  }
-  box.append(grid);
+  box.append(el('p', 'section-label', 'Ostatnie 7 dni'));
+  box.append(weekChart());
+  const free = TOPICS.find((topic) => topic.id === 'free');
+  const freeBtn = el('button', 'text-link', 'Albo wolny temat, bez scenariusza');
+  freeBtn.type = 'button';
+  freeBtn.addEventListener('click', () => startTopic(free));
+  const reports = el('button', 'text-link', sessions.length ? `Raporty (${sessions.length})` : 'Raporty');
+  reports.type = 'button';
+  reports.addEventListener('click', () => { location.hash = '#/historia'; });
+  const links = el('div', 'home-links');
+  links.append(freeBtn, reports);
+  box.append(links);
   const suggest = el('div', 'suggest');
   suggest.append(el('p', 'section-label', 'Albo stuknij zdanie'));
   for (const line of STARTERS) {
@@ -438,6 +1040,11 @@ function messageView(message, index) {
   const fixes = message.role === 'user' ? correctionsAfter(index) : [];
   appendHighlighted(bubble, message.text, fixes.map((item) => item.heard));
   article.append(bubble);
+  if (message.hint_pl) {
+    const hint = el('p', 'hint-pl', message.hint_pl);
+    hint.lang = 'pl';
+    article.append(hint);
+  }
   if (fixes.length) article.append(fixesView(fixes));
   if (message.role === 'assistant') {
     const who = el('div', 'tutor');
@@ -565,6 +1172,15 @@ function dueView() {
     example.lang = 'en-GB';
     back.append(example);
   }
+  const practise = el('button', 'text-btn', 'Powiedz to');
+  practise.type = 'button';
+  practise.addEventListener('click', (event) => {
+    event.stopPropagation();
+    unlockAudio(audioEl);
+    practisePhrase(card);
+  });
+  back.append(practise);
+  if (ui.drill?.id === card.id) back.append(drillNote());
   inner.append(front, back);
   scene.append(inner);
   wrap.append(scene);
@@ -912,10 +1528,49 @@ function renderSettings() {
     settings.autoSpeak = value;
     saveSettings(store, settings);
   }));
-  talk.append(toggle('Najpierw pokaż rozpoznany tekst', settings.confirmBeforeSend, (value) => {
+  talk.append(toggle('Wysyłaj sam, gdy zamilknę', settings.sendMode !== 'manual', (value) => {
+    settings.sendMode = value ? 'auto' : 'manual';
+    saveSettings(store, settings);
+  }));
+  talk.append(toggle('Zawsze pytaj przed wysłaniem', settings.confirmBeforeSend, (value) => {
     settings.confirmBeforeSend = value;
     saveSettings(store, settings);
   }));
+  talk.append(toggle('Po odpowiedzi Sama słuchaj znowu', settings.handsFree, (value) => {
+    settings.handsFree = value;
+    saveSettings(store, settings);
+  }));
+  talk.append(el('p', 'help', 'Przy włączonym wysyłaniu cisza kończy zdanie. Masz chwilę, żeby poprawić tekst. Rozmowa bez rąk na iPhonie czasem potrzebuje stuknięcia Mów — wtedy napiszę, co zrobić.'));
+  const goalField = el('label', 'field', 'Cel dzienny');
+  const goal = document.createElement('select');
+  for (const [value, label] of [['3', '3 zdania'], ['5', '5 zdań'], ['8', '8 zdań']]) {
+    const option = el('option', null, label);
+    option.value = value;
+    goal.append(option);
+  }
+  goal.value = String(settings.dailyGoal || 5);
+  goal.addEventListener('change', () => {
+    settings.dailyGoal = Number(goal.value);
+    saveSettings(store, settings);
+  });
+  goalField.append(goal);
+  talk.append(goalField);
+  const fontField = el('div', 'field');
+  fontField.append(el('span', null, 'Wielkość tekstu'));
+  const fonts = el('div', 'segment');
+  for (const [value, label] of [['sm', 'Mniejszy'], ['md', 'Zwykły'], ['lg', 'Większy']]) {
+    const button = el('button', null, label);
+    button.type = 'button';
+    button.setAttribute('aria-pressed', settings.fontScale === value ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      settings.fontScale = value;
+      saveSettings(store, settings);
+      render();
+    });
+    fonts.append(button);
+  }
+  fontField.append(fonts);
+  talk.append(fontField);
   const inputField = el('label', 'field', 'Jak Cię słuchać');
   const input = document.createElement('select');
   for (const [value, label] of [
@@ -1009,8 +1664,12 @@ function renderSettings() {
     cards = ensureSeed([], SEED).cards;
     saveCards(store, cards);
     messages = [];
+    sessions = [];
+    ui.scenario = null;
     ui.queueReady = false;
     ui.formNote = '';
+    ui.onboard = true;
+    ui.onboardStep = 0;
     render();
   });
   data.append(clear);
@@ -1058,18 +1717,26 @@ async function checkKey(typed) {
 }
 
 function newChat() {
-  if (messages.length && !window.confirm('Zacząć nową rozmowę? Słówka zostają.')) return;
+  if (messages.length && !window.confirm('Zacząć nową rozmowę? Słówka i raporty zostają.')) return;
   messages = [];
   saveMessages(store, messages);
+  ui.scenario = null;
+  ui.pending = '';
   ui.error = '';
   ui.live = '';
+  cancelAutoSend();
   stopListening(true);
   stopSpeaking();
-  render();
+  if (location.hash !== '#/') location.hash = '#/';
+  else {
+    ui.route = 'talk';
+    render();
+  }
 }
 
 async function startTopic(topic) {
   if (ui.busy) return;
+  ui.scenario = { id: topic.id, pl: topic.pl, goal: topic.goal || '' };
   unlockAudio(audioEl);
   stopSpeaking();
   showMessage({ id: uid(), role: 'note', text: `Temat: ${topic.pl}`, at: Date.now() });
@@ -1079,6 +1746,8 @@ async function startTopic(topic) {
 function sendDraft() {
   const draft = document.getElementById('draft');
   const text = draft ? draft.value : '';
+  cancelAutoSend();
+  ui.pending = '';
   unlockAudio(audioEl);
   submitText(text);
 }
@@ -1110,16 +1779,22 @@ async function onTalk() {
 function startRecognition() {
   cancelListen = false;
   ui.listening = true;
+  ui.pending = '';
+  cancelAutoSend();
   paintListen();
-  setStatus('Słucham… mów po angielsku.');
+  buzz(10);
+  const auto = autoSendEnabled();
+  setStatus(auto ? 'Słucham… zamilknij, a pokażę tekst.' : 'Słucham… stuknij Stop, gdy skończysz.');
   setLive('');
   let started = false;
   let watchdog = 0;
   const fail = (code) => {
     window.clearTimeout(watchdog);
+    clearSilence();
     if (!ui.listening && code !== 'no-start') return;
     cancelListen = true;
-    ui.recognitionBroken = true;
+    const gestureMiss = handsFreeArmed && (code === 'not-allowed' || code === 'service-not-allowed');
+    ui.recognitionBroken = !gestureMiss && code !== 'no-speech';
     try {
       recognizer?.abort();
     } catch {
@@ -1128,24 +1803,38 @@ function startRecognition() {
     recognizer = null;
     ui.listening = false;
     paintListen();
-    showProblem(recognitionProblem(code, {
-      standalone: isStandalone(),
-      hasKey: Boolean(activeKey(settings)),
-      hasRecorder: mediaRecorderSupported(),
-    }));
+    const polite = handsFreeArmed && (code === 'not-allowed' || code === 'service-not-allowed')
+      ? 'iPhone chce stuknięcia. Stuknij Mów, żeby powiedzieć następną kwestię.'
+      : recognitionProblem(code, {
+        standalone: isStandalone(),
+        hasKey: Boolean(activeKey(settings)),
+        hasRecorder: mediaRecorderSupported(),
+      });
+    handsFreeArmed = false;
+    showProblem(polite);
     document.getElementById('draft')?.focus();
   };
   try {
     recognizer = startBrowserRecognition({
+      continuous: !auto,
       onStart: () => {
         started = true;
         window.clearTimeout(watchdog);
       },
-      onPartial: (text) => setLive(text),
+      onPartial: (text) => {
+        setLive(text);
+        if (!auto || !text) return;
+        window.clearTimeout(silenceTimer);
+        silenceTimer = window.setTimeout(() => {
+          try { recognizer?.stop(); } catch { /* already ended */ }
+        }, 1400);
+      },
       onError: (code) => {
         if (code === 'aborted') return;
         if (code === 'no-speech') {
           cancelListen = true;
+          clearSilence();
+          handsFreeArmed = false;
           showProblem(recognitionProblem('no-speech'));
           return;
         }
@@ -1153,6 +1842,7 @@ function startRecognition() {
       },
       onEnd: (text) => {
         window.clearTimeout(watchdog);
+        clearSilence();
         recognizer = null;
         const heard = (text || ui.live || '').trim();
         ui.listening = false;
@@ -1160,6 +1850,7 @@ function startRecognition() {
         setLive('');
         if (cancelListen || ui.error) {
           cancelListen = false;
+          handsFreeArmed = false;
           return;
         }
         if (!started) {
@@ -1205,8 +1896,12 @@ function openRecorder(stream) {
 async function startRecording() {
   cancelListen = false;
   ui.listening = true;
+  ui.pending = '';
+  cancelAutoSend();
   paintListen();
-  setStatus('Nagrywam… stuknij Stop, gdy skończysz.');
+  buzz(10);
+  const auto = autoSendEnabled();
+  setStatus(auto ? 'Nagrywam… zamilknij, a wyślę.' : 'Nagrywam… stuknij Stop, gdy skończysz.');
   try {
     recorderStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
@@ -1236,6 +1931,10 @@ async function startRecording() {
       transcribeBlob(blob, type);
     });
     recorder.start();
+    if (auto) watchRecorderSilence(recorderStream);
+    recordCap = window.setTimeout(() => {
+      if (ui.listening && recorder?.state === 'recording') stopListening(false);
+    }, auto ? 20000 : 45000);
   } catch (err) {
     ui.listening = false;
     paintListen();
@@ -1250,6 +1949,7 @@ async function startRecording() {
 
 function stopListening(cancelled) {
   cancelListen = cancelled;
+  clearSilence();
   if (recognizer) {
     try {
       recognizer.stop();
@@ -1328,27 +2028,36 @@ async function transcribeBlob(blob, type) {
 
 async function onHeard(text) {
   const clean = text.trim();
+  handsFreeArmed = false;
   if (!clean) {
-    setStatus('Nic nie usłyszałem. Spróbuj jeszcze raz albo wpisz.');
+    setStatus('Nic nie usłyszałem. Stuknij Mów jeszcze raz albo wpisz.');
     return;
   }
-  if (settings.confirmBeforeSend) {
-    const draft = document.getElementById('draft');
-    if (draft) draft.value = clean;
-    setStatus('Sprawdź tekst i stuknij Wyślij.');
+  if (looksGarbled(clean)) {
+    await submitGarbled(clean);
     return;
   }
-  await submitText(clean);
+  ui.pending = clean;
+  ui.holdReview = !autoSendEnabled();
+  render();
+  if (!ui.holdReview) armAutoSend();
+  else setStatus('Sprawdź tekst i stuknij Wyślij.');
 }
 
 async function submitText(text, opts = {}) {
   const clean = String(text || '').trim();
   if (!clean || ui.busy) return;
+  cancelAutoSend();
+  ui.pending = '';
+  document.getElementById('review')?.remove();
   const draft = document.getElementById('draft');
   if (draft && !opts.hidden) draft.value = '';
   stopSpeaking();
   abandonRecognizer();
-  if (!opts.hidden) markPractice();
+  if (!opts.hidden) {
+    markPractice();
+    buzz(16);
+  }
   showMessage({
     id: uid(),
     role: 'user',
@@ -1375,22 +2084,27 @@ async function submitText(text, opts = {}) {
     const saved = rememberPhrases(turn.phrases);
     if (saved.length) showToast(`Zapisano: ${saved.join(', ')}`);
     setStatus('');
-    if (settings.autoSpeak) {
+    let spoke = false;
+    if (settings.autoSpeak && !opts.hidden) {
       setStatus('Mówię…');
       try {
         await speak(turn.reply);
+        spoke = true;
       } catch {
-        setStatus('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie.');
+        setStatus('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie. Sprawdź, czy iPhone nie jest wyciszony.');
       }
-      if (!ui.listening && !ui.status.startsWith('Nie udało')) setStatus(pathLabel(inputPath()));
-    } else {
-      setStatus(pathLabel(inputPath()));
     }
+    if (spoke && settings.heardSam !== 'yes') ui.heardPrompt = true;
+    if (!ui.listening && !String(ui.status).startsWith('Nie udało')) setStatus(idleStatus());
+    handsFreeArmed = Boolean(settings.handsFree && !opts.hidden && !turn.garbled);
   } catch (err) {
+    handsFreeArmed = false;
     showProblem(polishError(err));
   } finally {
     ui.busy = false;
-    paintListen();
+    if (ui.route === 'talk' && !ui.onboard) render();
+    else paintListen();
+    if (handsFreeArmed) maybeHandsFree();
   }
 }
 

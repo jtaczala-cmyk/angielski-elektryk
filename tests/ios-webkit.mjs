@@ -58,6 +58,16 @@ const HANGING_RECOGNITION = `
   window.SpeechRecognition = FakeRecognition;
 `;
 
+async function dismissOnboarding(page) {
+  const skip = page.locator('#onboard-skip');
+  try {
+    await skip.waitFor({ state: 'visible', timeout: 2500 });
+    await skip.click();
+  } catch {
+    /* settings were already saved */
+  }
+}
+
 function fail(message) {
   console.error(message);
   process.exitCode = 1;
@@ -71,6 +81,7 @@ try {
   const errors = [];
   page.on('pageerror', (err) => errors.push(String(err)));
   await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' });
+  await dismissOnboarding(page);
   await page.waitForSelector('#talk');
   const features = await page.evaluate(() => ({
     ios: /iPhone/.test(navigator.userAgent),
@@ -135,6 +146,7 @@ try {
   `);
   const home = await standalone.newPage();
   await home.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' });
+  await dismissOnboarding(home);
   await home.waitForSelector('#talk');
   const standaloneState = await home.evaluate(() => ({
     standalone: navigator.standalone === true,

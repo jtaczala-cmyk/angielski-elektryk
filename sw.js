@@ -1,4 +1,4 @@
-const CACHE = 'ae-shell-v3';
+const CACHE = 'ae-shell-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -11,6 +11,8 @@ const ASSETS = [
   './js/providers.js',
   './js/speech.js',
   './js/demo.js',
+  './js/quality.js',
+  './js/art.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',

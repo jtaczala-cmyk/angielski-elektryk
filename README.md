@@ -11,8 +11,10 @@ Otwórz stronę w Safari na iPhonie. Najwygodniej dodać ją do ekranu początko
 1. Wejdź w **Ustawienia** i wklej swój klucz API (OpenAI albo xAI). Klucz zostaje tylko w pamięci tej przeglądarki. Ta strona nie ma serwera i nigdzie go nie zapisuje poza telefonem.
 2. Klucz OpenAI tworzysz na [platform.openai.com/api-keys](https://platform.openai.com/api-keys). Klucz xAI na [console.x.ai](https://console.x.ai/).
 3. To kosztuje trochę. Płacisz dostawcy za tekst i osobno za czytanie na głos. Krótka wymiana to zwykle grosze albo ułamek korony, dłuższa sesja się sumuje. Ustaw limit wydatków w panelu dostawcy. Przycisk **Sprawdź klucz** tylko pyta, czy klucz jest ważny.
-4. Na ekranie **Rozmowa** stuknij pomarańczowy przycisk i mów po angielsku. Drugie stuknięcie wysyła. Możesz też wpisać zdanie. Partner odpowiada po brytyjsku, na głos, dopytuje i delikatnie poprawia.
-5. Nowe zwroty wpadają do **Słówek**. Powtórki liczy algorytm SM-2 (znowu zostaje na dziś, „Dobrze” odkłada kartę o dzień, potem o sześć, potem coraz rzadziej). **Wymowa** czyta brytyjskim głosem.
+4. Na ekranie **Rozmowa** stuknij czerwony przycisk i mów po angielsku. Gdy zamilkniesz, aplikacja pokaże tekst i sama go wyśle. Masz chwilę, żeby stuknąć **Popraw** albo **Jeszcze raz**. W Ustawieniach możesz wrócić do ręcznego Stop. Możesz też wpisać zdanie.
+5. Jeśli iPhone jest wyciszony, Sama nie słychać. Wyłącz tryb cichy — przełącznik z boku. Aplikacja zapyta „Słyszysz Sama?” po pierwszej odpowiedzi, bo Safari nie widzi tego przełącznika.
+6. Sześć sytuacji (wejście na budowę, usterka, pomiary, odprawa, rozmowa o pracę, telefon do hurtowni) ma cel. Na końcu stuknij **Raport**.
+7. Nowe zwroty wpadają do **Słówek**. Powtórki liczy algorytm SM-2. Na odwrocie karty **Powiedz to** porównuje wymowę. Cel dzienny i seria są na stronie głównej.
 
 Bez klucza działa **tryb próbny**: krótka, zapisana w telefonie odpowiedź, żeby dało się poklikać. To nie jest model.
 
@@ -21,7 +23,8 @@ Na iPhonie włącz dyktowanie i dodaj język English (UK): **Ustawienia → Ogó
 ## What it does
 
 - Free conversation with follow-up questions, level A2–C1, and gentle corrections (grammar, word choice, unnatural or American phrasing) plus an optional Polish hint.
-- Topic starters: site work, installation, testing, clients and foremen, HSE, a job interview, small talk, or a free subject.
+- Role-play for site induction, explaining a fault, testing and an EICR, a toolbox talk, a job interview, and a call to a supplier, plus a saved end-of-session report.
+- Topic chips once a chat is open: site work, installation, testing, clients and foremen, HSE, a job interview, small talk, or a free subject.
 - Personal word list with Polish translation, an example sentence, and SM-2 review. A starter deck of UK electrical language is included (consumer unit, RCD, RCBO, trunking, earthing, megger, and the rest).
 - Speech in: browser dictation in `en-GB` where it exists, otherwise a recording sent to the provider, and always a text box.
 - Speech out: provider TTS with a British voice, falling back to `speechSynthesis` and an `en-GB` voice.

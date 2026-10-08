@@ -224,9 +224,16 @@ export function buildTranscriptionRequest({ provider, apiKey, audio, mime, filen
 }
 
 async function send(url, init, fetchImpl) {
+  const extra = {};
+  if (!init.signal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    extra.signal = AbortSignal.timeout(30000);
+  }
   try {
-    return await fetchImpl(url, init);
+    return await fetchImpl(url, { ...init, ...extra });
   } catch (err) {
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw new ProviderError('Połączenie trwało za długo. Sprawdź internet i spróbuj jeszcze raz.');
+    }
     throw new ProviderError('Połączenie przerwane.', { corsBlocked: err instanceof TypeError });
   }
 }

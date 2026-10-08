@@ -49,13 +49,15 @@ A static page can call these APIs. Preflight was checked with `Origin: https://s
 
 ## Speech on an iPhone 15 Pro
 
-Safari on iOS has `webkitSpeechRecognition` since iOS 14.5, including iOS 26, with partial support. The app sets `lang` to `en-GB`, `interimResults`, and `continuous` when the browser allows it. Dictation has to be enabled, with English (UK) downloaded.
+Safari on iOS has `webkitSpeechRecognition` since iOS 14.5, including iOS 26, with partial support. In a Safari tab the app tries it (`en-GB`). Dictation has to be enabled, with English (UK) downloaded: Settings → General → Keyboard → Dictation, and Settings → Safari → Microphone.
 
-WebKit bug 321436: after an `<audio>` element plays, the same recognizer can hang with no result and no error. The app aborts any live recognizer before playback and creates a **new** recognizer for the next turn.
+From the Home Screen icon, that API is present but often never starts and never reports an error. The app records with `MediaRecorder` instead and sends `audio/mp4` (`.m4a`) to the provider. That path needs an API key. Without a key, type the sentence; trial mode still answers.
 
-If recognition is missing or fails, the app records with `MediaRecorder`. iOS Safari typically produces `audio/mp4`, which both OpenAI transcriptions and xAI `/v1/stt` accept (sent as `.m4a`). The text field is always there.
+WebKit bug 321436 (still present on iOS 26): playing an `<audio>` element makes the next `SpeechRecognition.start()` hang with no result and no error. The app unlocks sound with `AudioContext` and plays provider audio through Web Audio, not the `<audio>` tag. If recognition does not fire `onstart` within 2.5s, a Polish message stays on screen and the next tap records.
 
-Playback uses one `<audio playsinline>` element. The first tap plays a silent clip on that element so later speech is allowed under iOS autoplay rules. If provider TTS fails, the app uses `speechSynthesis`, prefers an `en-GB` voice (Daniel, Kate, Serena, …), and calls `resume()` while speaking so iOS does not pause a long utterance.
+xAI does publish `POST /v1/tts` and `POST /v1/stt`. If either call fails (including 404), speech out falls back to `speechSynthesis` in `en-GB`, and speech in asks him to type. Provider requests time out after 30s so a hung call cannot leave the talk button stuck.
+
+Ustawienia → **Sprawdź telefon** reports microphone permission, dictation, the iPhone voice, and the API key in Polish.
 
 The layout is a single column, thumb-reachable: topics along the top, the transcript in the middle, the composer and the large talk button above the tab bar, with safe-area padding for the iPhone home indicator. `visualViewport` keeps the composer above the keyboard.
 

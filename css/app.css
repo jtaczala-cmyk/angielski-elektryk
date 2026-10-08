@@ -1015,6 +1015,18 @@ textarea {
 .check input:checked { background: var(--red); }
 .check input:checked::after { transform: translateX(20px); }
 
+.diagnostics {
+  margin: 12px 0 0;
+  white-space: pre-wrap;
+  background: color-mix(in srgb, var(--spark) 10%, var(--card-solid));
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 12px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 .links { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .links a { color: var(--red); font-weight: 750; }
 

@@ -1,8 +1,5 @@
 /** Browser speech. iOS Safari has webkitSpeechRecognition (since 14.5, including iOS 26) but only partial support. */
 
-const SILENT_WAV =
-  'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-
 export function getRecognitionCtor(win = globalThis) {
   return win.SpeechRecognition || win.webkitSpeechRecognition || null;
 }
@@ -11,20 +8,38 @@ export function mediaRecorderSupported(win = globalThis) {
   return typeof win.MediaRecorder !== 'undefined' && Boolean(win.navigator?.mediaDevices?.getUserMedia);
 }
 
-export function describeInputPath({ inputMode, hasRecognition, hasRecorder }) {
+export function isIos(win = globalThis) {
+  const nav = win.navigator;
+  const ua = nav?.userAgent || '';
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  return nav?.platform === 'MacIntel' && Number(nav.maxTouchPoints) > 1;
+}
+
+/** Home Screen web app. iOS exposes webkitSpeechRecognition here, but it often never starts. */
+export function isStandalone(win = globalThis) {
+  if (win.navigator?.standalone === true) return true;
+  try {
+    return win.matchMedia?.('(display-mode: standalone)')?.matches === true;
+  } catch {
+    return false;
+  }
+}
+
+export function describeInputPath({ inputMode, hasRecognition, hasRecorder, preferRecorder = false }) {
   if (inputMode === 'type') return 'type';
   if (inputMode === 'record') return hasRecorder ? 'record' : 'type';
   if (inputMode === 'browser') {
-    if (hasRecognition) return 'browser';
+    if (hasRecognition && !preferRecorder) return 'browser';
     return hasRecorder ? 'record' : 'type';
   }
+  if (preferRecorder && hasRecorder) return 'record';
   if (hasRecognition) return 'browser';
   if (hasRecorder) return 'record';
   return 'type';
 }
 
-export function pickRecorderMime(isSupported) {
-  const preferred = ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+export function pickRecorderMime(isSupported, { ios = false } = {}) {
+  const preferred = ['audio/mp4', 'audio/aac', 'audio/mp4;codecs=mp4a.40.2', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
   for (const type of preferred) {
     try {
       if (isSupported(type)) return type;
@@ -32,7 +47,27 @@ export function pickRecorderMime(isSupported) {
       /* ignore broken detectors */
     }
   }
+  // iOS Safari records AAC in an mp4 even when isTypeSupported('audio/mp4') is false.
+  if (ios) return 'audio/mp4';
   return '';
+}
+
+export function recognitionProblem(code, { standalone = false, hasKey = false, hasRecorder = true } = {}) {
+  if (code === 'not-allowed' || code === 'service-not-allowed') {
+    return 'Safari nie dało mikrofonu albo dyktowania. Zezwól: Ustawienia → Safari → Mikrofon, oraz Ustawienia → Ogólne → Klawiatura → Dyktowanie, język English (UK). Możesz też wpisać zdanie.';
+  }
+  if (code === 'audio-capture') return 'Nie widzę mikrofonu. Zamknij inną aplikację, która go używa, albo wpisz zdanie.';
+  if (code === 'network') return 'Dyktowanie Apple potrzebuje internetu. Sprawdź sieć albo wpisz zdanie.';
+  if (code === 'no-speech') return 'Nic nie usłyszałem. Powiedz głośniej albo wpisz zdanie.';
+  if (code === 'no-start' || code === 'hung') {
+    if (!hasRecorder) return 'Dyktowanie nie wystartowało. Wpisz zdanie na dole.';
+    if (standalone && !hasKey) {
+      return 'Z ekranu początkowego iPhone nie rozpoznaje mowy bez klucza API. Wpisz zdanie na dole albo dodaj klucz w Ustawieniach — wtedy nagram i wyślę plik.';
+    }
+    return 'Dyktowanie nie wystartowało. Stuknij Mów jeszcze raz (nagram dźwięk) albo wpisz zdanie.';
+  }
+  if (code === 'no-recognition') return 'To Safari nie ma dyktowania. Wpisz zdanie albo dodaj klucz, żeby wysłać nagranie.';
+  return 'Dyktowanie niedostępne. Wpisz zdanie albo stuknij „Sprawdź telefon” w Ustawieniach.';
 }
 
 export function extensionForMime(mime) {
@@ -66,18 +101,28 @@ export function pathLabel(path) {
 let audioUnlocked = false;
 let unlockGate = Promise.resolve();
 
-export function unlockAudio(audio) {
-  if (!audio || audioUnlocked) return unlockGate;
+let sharedContext = null;
+
+export function sharedAudioContext(win = globalThis) {
+  if (sharedContext) return sharedContext;
+  const Ctor = win.AudioContext || win.webkitAudioContext;
+  if (!Ctor) return null;
+  sharedContext = new Ctor();
+  return sharedContext;
+}
+
+/**
+ * Unlock sound from the tap itself. Do not play the <audio> element here:
+ * on iOS 26 that hangs the next webkitSpeechRecognition with no error and no result.
+ */
+export function unlockAudio() {
+  if (audioUnlocked) return unlockGate;
   audioUnlocked = true;
-  audio.src = SILENT_WAV;
-  const played = audio.play();
-  unlockGate = (played || Promise.resolve())
-    .then(() => {
-      audio.pause();
-    })
-    .catch(() => {
-      audioUnlocked = false;
-    });
+  const ctx = sharedAudioContext();
+  const resumed = ctx && ctx.state === 'suspended' && typeof ctx.resume === 'function' ? ctx.resume() : Promise.resolve();
+  unlockGate = Promise.resolve(resumed).catch(() => {
+    audioUnlocked = false;
+  });
   const synth = globalThis.speechSynthesis;
   if (synth && typeof synth.speak === 'function' && globalThis.SpeechSynthesisUtterance) {
     try {
@@ -91,6 +136,26 @@ export function unlockAudio(audio) {
     }
   }
   return unlockGate;
+}
+
+export async function playWithWebAudio(blob, win = globalThis) {
+  const ctx = sharedAudioContext(win);
+  if (!ctx || typeof ctx.decodeAudioData !== 'function') throw new Error('no-web-audio');
+  if (ctx.state === 'suspended') await ctx.resume();
+  const bytes = await blob.arrayBuffer();
+  const buffer = await ctx.decodeAudioData(bytes.slice(0));
+  await new Promise((resolve, reject) => {
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.onended = () => resolve();
+    try {
+      source.start();
+    } catch (err) {
+      reject(err);
+    }
+    win.setTimeout(resolve, Math.min(120000, Math.max(2000, buffer.duration * 1000 + 500)));
+  });
 }
 
 export function waitForAudioUnlock() {
@@ -163,7 +228,7 @@ export function speakBrowser(text, { lang = 'en-GB', rate = 0.96 } = {}) {
  * Fresh recognizer every time. On iOS, reusing one after HTML audio has played
  * can hang with no result and no error (WebKit bug 321436).
  */
-export function startBrowserRecognition({ lang = 'en-GB', onPartial, onError, onEnd, win = globalThis } = {}) {
+export function startBrowserRecognition({ lang = 'en-GB', onPartial, onStart, onError, onEnd, win = globalThis } = {}) {
   const Ctor = getRecognitionCtor(win);
   if (!Ctor) throw new Error('no-recognition');
   const recognition = new Ctor();
@@ -185,6 +250,7 @@ export function startBrowserRecognition({ lang = 'en-GB', onPartial, onError, on
     }
     onPartial?.(`${finalText} ${interim}`.replace(/\s+/g, ' ').trim());
   };
+  recognition.onstart = () => onStart?.();
   recognition.onerror = (event) => {
     onError?.(event?.error || 'error');
   };

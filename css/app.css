@@ -55,6 +55,7 @@ button { cursor: pointer; }
   flex-direction: column;
   position: relative;
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
 .top {
@@ -166,7 +167,7 @@ main {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 16px 8px;
+  padding: 12px 16px 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -323,11 +324,13 @@ mark.heard {
 }
 
 .dock {
+  flex: none;
   padding: 8px 16px 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: linear-gradient(180deg, rgba(243, 239, 230, 0), var(--paper) 28%);
+  background: var(--paper);
+  border-top: 1px solid var(--line);
 }
 
 .composer {
@@ -420,13 +423,16 @@ textarea {
   color: var(--navy);
 }
 
+.live:empty { display: none; }
+
 .nav {
+  flex: none;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--line);
-  background: rgba(255, 253, 248, 0.92);
+  background: rgba(255, 253, 248, 0.96);
 }
 
 .nav button {
@@ -628,6 +634,22 @@ textarea {
   font-family: "Iowan Old Style", Palatino, Georgia, serif;
   font-size: 30px;
   margin: 8px 0;
+}
+
+@media (max-height: 760px) {
+  .top { padding-top: 6px; padding-bottom: 6px; }
+  h1 { font-size: 22px; }
+  .mark { width: 34px; height: 34px; }
+  .topics { padding: 6px 16px 2px; }
+  .banner { margin-top: 4px; padding: 8px 10px; font-size: 13px; }
+  .transcript { padding-bottom: 12px; }
+  .dock { gap: 6px; padding: 6px 16px 6px; }
+  textarea { min-height: 42px; max-height: 42px; }
+  .composer .send { width: 42px; height: 42px; }
+  .talk { width: 68px; height: 68px; }
+  .talk-row { min-height: 72px; }
+  .nav { padding-top: 2px; padding-bottom: calc(2px + env(safe-area-inset-bottom)); }
+  .nav button { padding: 6px 4px 4px; }
 }
 
 @media (max-width: 560px) {

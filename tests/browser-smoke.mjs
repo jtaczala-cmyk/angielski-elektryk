@@ -48,7 +48,7 @@ const chrome = spawn('google-chrome', [
   '--disable-dev-shm-usage',
   '--use-fake-ui-for-media-stream',
   '--use-fake-device-for-media-stream',
-  `--remote-debugging-port=9222`,
+  '--remote-debugging-port=9333',
   '--user-data-dir=/tmp/ae-chrome-profile',
   'about:blank',
 ], { stdio: 'ignore' });
@@ -66,14 +66,14 @@ try {
   let version;
   for (let i = 0; i < 40; i += 1) {
     try {
-      version = await fetch('http://127.0.0.1:9222/json/version').then((res) => res.json());
+      version = await fetch('http://127.0.0.1:9333/json/version').then((res) => res.json());
       break;
     } catch {
       await delay(150);
     }
   }
   if (!version) throw new Error('Chrome did not open a debugging port');
-  const pageList = await fetch('http://127.0.0.1:9222/json/list').then((res) => res.json());
+  const pageList = await fetch('http://127.0.0.1:9333/json/list').then((res) => res.json());
   const page = pageList.find((item) => item.type === 'page');
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
@@ -178,8 +178,25 @@ try {
   if (marks < 2) fail(`expected highlighted mistakes, got ${marks}`);
   const saved = await evaluate(`JSON.parse(localStorage.getItem('ae.cards.v1')).some((card) => card.en === 'for two years')`);
   if (!saved) fail('expected the new phrase in the word list');
-  await evaluate(`document.querySelector('.msg-user')?.scrollIntoView({ block: 'start' })`);
   await delay(200);
+  const layout = await evaluate(`(() => {
+    const list = document.querySelector('#transcript');
+    const dock = document.querySelector('.dock');
+    const lr = list.getBoundingClientRect();
+    const dr = dock.getBoundingClientRect();
+    const user = document.querySelector('.msg-user');
+    const fixes = document.querySelector('.fixes');
+    const ur = user.getBoundingClientRect();
+    const fr = fixes.getBoundingClientRect();
+    return {
+      userInside: ur.top >= lr.top - 1 && ur.bottom <= lr.bottom + 1,
+      fixesInside: fr.top >= lr.top - 1 && fr.bottom <= lr.bottom + 1,
+      clearOfDock: ur.bottom <= dr.top + 1 && fr.bottom <= dr.top + 1,
+    };
+  })()`);
+  if (!layout.userInside || !layout.fixesInside || !layout.clearOfDock) {
+    fail(`conversation layout ${JSON.stringify(layout)}`);
+  }
   await shot('conversation.png');
   console.log('starter', clicked);
 

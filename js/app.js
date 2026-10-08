@@ -240,9 +240,7 @@ function renderTalk() {
   status.setAttribute('aria-live', 'polite');
   dock.append(status);
   screen.append(dock);
-  queueMicrotask(() => {
-    transcript.scrollTop = transcript.scrollHeight;
-  });
+  queueMicrotask(revealLatest);
   return screen;
 }
 
@@ -1059,7 +1057,7 @@ function showMessage(message) {
   if (!list || message.hidden) return;
   document.getElementById('empty')?.remove();
   list.append(messageView(message, messages.length - 1));
-  list.scrollTop = list.scrollHeight;
+  revealLatest();
 }
 
 function refreshPreviousUser() {
@@ -1070,10 +1068,31 @@ function refreshPreviousUser() {
     if (message.role === 'user' && !message.hidden) {
       const node = list.querySelector(`[data-id="${message.id}"]`);
       node?.replaceWith(messageView(message, index));
+      revealLatest();
       return;
     }
     if (message.role === 'assistant') return;
   }
+}
+
+function revealLatest() {
+  const list = document.getElementById('transcript');
+  if (!list) return;
+  const users = list.querySelectorAll('.msg-user');
+  const target = users[users.length - 1] || list.querySelector('.msg');
+  if (!target) return;
+  let end = target;
+  const next = target.nextElementSibling;
+  if (next && next.classList.contains('msg-assistant')) end = next;
+  const listRect = list.getBoundingClientRect();
+  const turnHeight = end.getBoundingClientRect().bottom - target.getBoundingClientRect().top;
+  if (turnHeight > 0 && turnHeight <= list.clientHeight - 12) {
+    const delta = end.getBoundingClientRect().bottom - listRect.bottom;
+    list.scrollTop += delta + 8;
+    return;
+  }
+  const delta = target.getBoundingClientRect().top - listRect.top;
+  list.scrollTop += delta - 8;
 }
 
 function paintListen() {

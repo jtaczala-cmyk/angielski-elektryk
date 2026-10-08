@@ -48,6 +48,7 @@ const ui = {
   confirmDelete: '',
   formNote: '',
   installEvent: null,
+  speaking: false,
 };
 
 let recognizer = null;
@@ -57,6 +58,20 @@ let recorderStream = null;
 let cancelListen = false;
 let toastTimer = 0;
 let currentObjectUrl = '';
+let speakGen = 0;
+
+const PRACTICE_KEY = 'ae.practice.v1';
+const AVATAR_SVG = '<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="32" fill="#0c2340"/><path d="M10 50c4-14 14-18 22-18s18 4 22 18" fill="#1d4e89"/><circle cx="32" cy="30" r="10" fill="#f0c7a8"/><path d="M14 26c2-14 12-20 18-20s16 6 18 20c-5 2-10 4-18 4s-13-2-18-4z" fill="#e4c36a"/><rect x="18" y="24" width="28" height="5" rx="2" fill="#c8102e"/></svg>';
+const TOPIC_ICONS = {
+  site: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 20V9l9-6 9 6v11h-6v-6H9v6H3z"/></svg>',
+  install: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 3h3v6h2V3h3v8h3v2H5v-2h3V3zm-2 12h12v2H6v-2zm2 4h8v2H8v-2z"/></svg>',
+  test: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h10v8a5 5 0 0 1-10 0V4zm12 1h4v2h-2v9a4 4 0 1 1-2-3.46V5z"/></svg>',
+  people: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm8 1a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5zM2 19c.4-3 2.6-4.5 6-4.5S13.6 16 14 19H2zm12 .5c.2-1.6 1-2.9 2.4-3.7 2.2.4 3.6 1.6 4.1 3.7H14z"/></svg>',
+  hse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2 4 5v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V5l-8-3zm-1 13-3-3 1.4-1.4L11 12.2l3.6-3.6L16 10l-5 5z"/></svg>',
+  job: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 4h6v2h5v14H4V6h5V4zm2 2v0h2V4h-2v2z"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 4h16v11H8l-4 4V4z"/></svg>',
+  free: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M13 2 4 14h7l-1 8 10-14h-7l0-6z"/></svg>',
+};
 
 const TITLES = { talk: 'Rozmowa', cards: 'Słówka', settings: 'Ustawienia' };
 const STARTERS = [
@@ -80,6 +95,92 @@ function hashFor(route) {
 
 function uid() {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function localDay(time = Date.now()) {
+  const date = new Date(time);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function practiceDays() {
+  const days = new Set();
+  try {
+    const saved = JSON.parse(store.getItem(PRACTICE_KEY) || '[]');
+    if (Array.isArray(saved)) saved.forEach((day) => days.add(String(day)));
+  } catch {
+    /* ignore a broken local note */
+  }
+  for (const card of cards) {
+    if (card.lastReviewed) days.add(localDay(card.lastReviewed));
+  }
+  for (const message of messages) {
+    if (message.role === 'user' && !message.hidden && message.at) days.add(localDay(message.at));
+  }
+  return days;
+}
+
+function markPractice(time = Date.now()) {
+  const day = localDay(time);
+  let saved = [];
+  try {
+    const parsed = JSON.parse(store.getItem(PRACTICE_KEY) || '[]');
+    if (Array.isArray(parsed)) saved = parsed.map(String);
+  } catch {
+    saved = [];
+  }
+  if (!saved.includes(day)) {
+    saved.push(day);
+    store.setItem(PRACTICE_KEY, JSON.stringify(saved.slice(-400)));
+  }
+}
+
+function streakCount() {
+  const days = practiceDays();
+  const cursor = new Date();
+  if (!days.has(localDay(cursor))) cursor.setDate(cursor.getDate() - 1);
+  let count = 0;
+  while (days.has(localDay(cursor))) {
+    count += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return count;
+}
+
+function learnedCount() {
+  return cards.filter((card) => Number(card.repetitions) > 0).length;
+}
+
+function greeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Dzień dobry, Jacek';
+  if (hour < 18) return 'Cześć, Jacek';
+  return 'Dobry wieczór, Jacek';
+}
+
+function statBlock(label, value) {
+  const node = el('div', 'stat');
+  node.append(el('b', null, value));
+  node.append(el('span', null, label));
+  return node;
+}
+
+function statsRow() {
+  const row = el('div', 'stats');
+  row.append(
+    statBlock('Seria', String(streakCount())),
+    statBlock('Opanowane', String(learnedCount())),
+    statBlock('Na dziś', String(dueCards(cards).length)),
+  );
+  return row;
+}
+
+function jackMark() {
+  const flag = el('span', 'jack');
+  flag.setAttribute('aria-hidden', 'true');
+  flag.innerHTML = '<svg viewBox="0 0 60 40"><rect width="60" height="40" fill="#012169"/><path d="M0 0 60 40M60 0 0 40" stroke="#fff" stroke-width="8"/><path d="M0 0 60 40M60 0 0 40" stroke="#c8102e" stroke-width="4"/><path d="M30 0v40M0 20h60" stroke="#fff" stroke-width="14"/><path d="M30 0v40M0 20h60" stroke="#c8102e" stroke-width="8"/></svg>';
+  return flag;
 }
 
 function el(tag, className, text) {
@@ -166,18 +267,21 @@ function renderTalk() {
     banner.append('Bez klucza API odpowiadam z pamięci telefonu, nie z modelu. Klucz dodasz w ustawieniach.');
     screen.append(banner);
   }
-  const topics = el('div', 'topics');
-  for (const topic of TOPICS) {
-    const button = el('button', null, topic.pl);
-    button.type = 'button';
-    button.addEventListener('click', () => startTopic(topic));
-    topics.append(button);
+  const hasChat = messages.some((message) => !message.hidden);
+  if (hasChat) {
+    const topics = el('div', 'topics');
+    for (const topic of TOPICS) {
+      const button = el('button', null, topic.pl);
+      button.type = 'button';
+      button.addEventListener('click', () => startTopic(topic));
+      topics.append(button);
+    }
+    const fresh = el('button', null, 'Nowa');
+    fresh.type = 'button';
+    fresh.addEventListener('click', newChat);
+    topics.append(fresh);
+    screen.append(topics);
   }
-  const fresh = el('button', null, 'Nowa');
-  fresh.type = 'button';
-  fresh.addEventListener('click', newChat);
-  topics.append(fresh);
-  screen.append(topics);
 
   const transcript = el('div', 'transcript');
   transcript.id = 'transcript';
@@ -228,7 +332,7 @@ function renderTalk() {
   talk.disabled = ui.busy && !ui.listening;
   talk.setAttribute('aria-pressed', ui.listening ? 'true' : 'false');
   talk.setAttribute('aria-label', ui.listening ? 'Zatrzymaj i wyślij' : 'Mów po angielsku');
-  talk.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zm-7 9a1 1 0 0 0-2 0 9 9 0 0 0 8 8.9V22H9v2h6v-2h-2v-1.1A9 9 0 0 0 21 12a1 1 0 0 0-2 0 7 7 0 0 1-14 0z"/></svg>';
+  talk.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zm-7 9a1 1 0 0 0-2 0 9 9 0 0 0 8 8.9V22H9v2h6v-2h-2v-1.1A9 9 0 0 0 21 12a1 1 0 0 0-2 0 7 7 0 0 1-14 0z"/></svg><span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>';
   const label = el('span', null, ui.listening ? 'Stop' : 'Mów');
   label.id = 'talk-label';
   talk.append(label);
@@ -245,12 +349,38 @@ function renderTalk() {
 }
 
 function emptyState() {
-  const box = el('div', 'empty');
+  const box = el('div', 'home');
   box.id = 'empty';
-  box.append(el('h2', null, 'Mów, jak na budowie.'));
-  box.append(el('p', null, 'Stuknij pomarańczowy przycisk i powiedz coś po angielsku. Odpowiem na głos, dopytam i poprawię tylko to, co brzmi nienaturalnie.'));
+  const hero = el('div', 'hero');
+  hero.append(jackMark());
+  hero.append(el('p', 'hero-kicker', greeting()));
+  hero.append(el('h2', null, 'Mów, jak na budowie.'));
+  hero.append(el('p', null, 'Stuknij czerwony przycisk i powiedz coś po angielsku. Sam odpowie na głos, dopyta i poprawi tylko to, co brzmi nienaturalnie.'));
+  const learned = learnedCount();
+  const total = Math.max(cards.length, 1);
+  const meter = el('div', 'meter');
+  const fill = el('span');
+  fill.style.width = `${Math.round((learned / total) * 100)}%`;
+  meter.append(fill);
+  meter.setAttribute('aria-hidden', 'true');
+  hero.append(meter);
+  hero.append(el('p', 'meter-label', `${learned} z ${cards.length} haseł opanowanych`));
+  box.append(hero);
+  box.append(statsRow());
+  box.append(el('p', 'section-label', 'Tematy'));
+  const grid = el('div', 'topic-grid');
+  for (const topic of TOPICS) {
+    const button = el('button', 'topic-card');
+    button.type = 'button';
+    const icon = el('span', 'topic-ico');
+    icon.innerHTML = TOPIC_ICONS[topic.id] || TOPIC_ICONS.free;
+    button.append(icon, el('span', null, topic.pl));
+    button.addEventListener('click', () => startTopic(topic));
+    grid.append(button);
+  }
+  box.append(grid);
   const suggest = el('div', 'suggest');
-  suggest.append(el('span', null, 'Albo stuknij zdanie'));
+  suggest.append(el('p', 'section-label', 'Albo stuknij zdanie'));
   for (const line of STARTERS) {
     const button = el('button', null, line);
     button.type = 'button';
@@ -280,6 +410,12 @@ function messageView(message, index) {
   article.append(bubble);
   if (fixes.length) article.append(fixesView(fixes));
   if (message.role === 'assistant') {
+    const who = el('div', 'tutor');
+    const avatar = el('span', 'avatar');
+    avatar.innerHTML = AVATAR_SVG;
+    if (ui.speaking) avatar.classList.add('is-speaking');
+    who.append(avatar, el('span', 'tutor-name', 'Sam'));
+    article.prepend(who);
     const tools = el('div', 'msg-tools');
     const replay = el('button', 'text-btn', 'Odsłuchaj');
     replay.type = 'button';
@@ -356,7 +492,7 @@ function renderCards() {
     render();
   });
   tabs.append(dueBtn, allBtn);
-  stats.append(el('p', null, `${dueCards(cards).length} na dziś · ${cards.length} w zeszycie`), tabs);
+  stats.append(statsRow(), tabs);
   scroll.append(stats);
   if (ui.cardTab === 'due') scroll.append(dueView());
   else scroll.append(listView());
@@ -382,29 +518,29 @@ function dueView() {
     wrap.append(done);
     return wrap;
   }
-  wrap.append(el('p', 'path', `Zostało ${ui.queue.length}`));
-  const flash = el('article', 'flash');
-  flash.append(el('p', 'meta', card.source === 'seed' ? 'Zestaw startowy' : 'Z rozmowy'));
+  wrap.append(el('p', 'path queue-left', `Zostało ${ui.queue.length}`));
+  const scene = el('div', 'flash-scene');
+  const inner = el('div', ui.flipped ? 'flash-inner is-flipped' : 'flash-inner');
+  const front = el('div', 'flash-face front');
+  front.append(el('p', 'meta', card.source === 'seed' ? 'Zestaw startowy' : 'Z rozmowy'));
   const word = el('h2', 'word', card.en);
   word.lang = 'en-GB';
-  flash.append(word);
-  if (ui.flipped) {
-    const gloss = el('p', 'gloss', card.pl);
-    gloss.lang = 'pl';
-    flash.append(gloss);
-    if (card.example) {
-      const example = el('p', 'example', card.example);
-      example.lang = 'en-GB';
-      flash.append(example);
-    }
+  front.append(word);
+  const back = el('div', 'flash-face back');
+  const gloss = el('p', 'gloss', card.pl);
+  gloss.lang = 'pl';
+  back.append(gloss);
+  if (card.example) {
+    const example = el('p', 'example', card.example);
+    example.lang = 'en-GB';
+    back.append(example);
   }
-  const actions = el('div', 'msg-tools');
+  inner.append(front, back);
+  scene.append(inner);
+  wrap.append(scene);
+  const actions = el('div', 'card-actions');
   const flip = el('button', 'text-btn', ui.flipped ? 'Ukryj tłumaczenie' : 'Pokaż tłumaczenie');
   flip.type = 'button';
-  flip.addEventListener('click', () => {
-    ui.flipped = !ui.flipped;
-    render();
-  });
   const say = el('button', 'text-btn', 'Wymowa');
   say.type = 'button';
   say.addEventListener('click', () => {
@@ -412,25 +548,43 @@ function dueView() {
     const line = card.example ? `${card.en}. ${card.example}` : card.en;
     speak(line, { slow: true });
   });
-  actions.append(flip, say);
-  flash.append(actions);
-  wrap.append(flash);
-  if (ui.flipped) {
-    const grades = el('div', 'grades');
-    const options = [
-      ['again', 'Jeszcze raz', 1],
-      ['hard', 'Trudne', 3],
-      ['good', 'Dobrze', 4],
-      ['easy', 'Łatwo', 5],
-    ];
-    for (const [name, label, grade] of options) {
-      const button = el('button', `grade ${name}`, label);
-      button.type = 'button';
-      button.addEventListener('click', () => gradeCard(card.id, grade));
-      grades.append(button);
-    }
-    wrap.append(grades);
+  const grades = el('div', 'grades');
+  grades.hidden = !ui.flipped;
+  const options = [
+    ['again', 'Jeszcze raz', 1],
+    ['hard', 'Trudne', 3],
+    ['good', 'Dobrze', 4],
+    ['easy', 'Łatwo', 5],
+  ];
+  for (const [name, label, grade] of options) {
+    const button = el('button', `grade ${name}`, label);
+    button.type = 'button';
+    button.addEventListener('click', () => gradeCard(card.id, grade));
+    grades.append(button);
   }
+  flip.addEventListener('click', () => {
+    if (inner.classList.contains('is-flipping')) return;
+    const apply = () => {
+      ui.flipped = !ui.flipped;
+      inner.classList.toggle('is-flipped', ui.flipped);
+      flip.textContent = ui.flipped ? 'Ukryj tłumaczenie' : 'Pokaż tłumaczenie';
+      grades.hidden = !ui.flipped;
+      inner.classList.remove('is-revealed');
+      void inner.offsetWidth;
+      inner.classList.add('is-revealed');
+    };
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      apply();
+      return;
+    }
+    inner.classList.add('is-flipping');
+    window.setTimeout(() => {
+      inner.classList.remove('is-flipping');
+      apply();
+    }, 160);
+  });
+  actions.append(flip, say);
+  wrap.append(actions, grades);
   return wrap;
 }
 
@@ -490,12 +644,17 @@ function wordList(query) {
 }
 
 function gradeCard(id, grade) {
-  cards = cards.map((card) => (card.id === id ? reviewCard(card, grade) : card));
-  saveCards(store, cards);
-  ui.queue = ui.queue.filter((item) => item !== id);
-  if (grade < 3) ui.queue.push(id);
-  ui.flipped = false;
-  render();
+  const scene = document.querySelector('.flash-scene');
+  if (scene) scene.classList.add(grade < 3 ? 'is-miss' : 'is-hit');
+  window.setTimeout(() => {
+    markPractice();
+    cards = cards.map((card) => (card.id === id ? reviewCard(card, grade) : card));
+    saveCards(store, cards);
+    ui.queue = ui.queue.filter((item) => item !== id);
+    if (grade < 3) ui.queue.push(id);
+    ui.flipped = false;
+    render();
+  }, scene ? 220 : 0);
 }
 
 function renderSettings() {
@@ -705,6 +864,7 @@ function renderSettings() {
   clear.addEventListener('click', () => {
     if (!window.confirm('Usunąć klucz, rozmowę i postępy słówek z tego telefonu?')) return;
     clearAll(store);
+    store.removeItem(PRACTICE_KEY);
     settings = loadSettings(store);
     cards = ensureSeed([], SEED).cards;
     saveCards(store, cards);
@@ -974,6 +1134,7 @@ async function submitText(text, opts = {}) {
   if (draft && !opts.hidden) draft.value = '';
   stopSpeaking();
   abandonRecognizer();
+  if (!opts.hidden) markPractice();
   showMessage({
     id: uid(),
     role: 'user',
@@ -1102,9 +1263,13 @@ function paintListen() {
   const send = document.getElementById('send');
   if (talk) {
     talk.classList.toggle('is-live', ui.listening);
+    talk.classList.toggle('is-speaking', ui.speaking && !ui.listening);
     talk.disabled = ui.busy && !ui.listening;
     talk.setAttribute('aria-pressed', ui.listening ? 'true' : 'false');
   }
+  document.querySelectorAll('.avatar').forEach((node) => {
+    node.classList.toggle('is-speaking', ui.speaking && !ui.listening);
+  });
   if (label) label.textContent = ui.listening ? 'Stop' : 'Mów';
   if (cancel) cancel.hidden = !ui.listening;
   if (send) send.disabled = ui.busy;
@@ -1143,22 +1308,32 @@ async function speak(text, { slow = false } = {}) {
   abandonRecognizer();
   const line = String(text || '').trim();
   if (!line) return;
-  const useProvider = settings.voiceMode === 'provider' && activeKey(settings);
-  if (useProvider) {
-    try {
-      const blob = await synthesizeSpeech({
-        provider: settings.provider,
-        apiKey: activeKey(settings),
-        text: line,
-        voice: currentVoice(),
-      });
-      await playBlob(blob);
-      return;
-    } catch {
-      setStatus('Głos dostawcy niedostępny. Czytam głosem telefonu.');
+  const gen = ++speakGen;
+  ui.speaking = true;
+  paintListen();
+  try {
+    const useProvider = settings.voiceMode === 'provider' && activeKey(settings);
+    if (useProvider) {
+      try {
+        const blob = await synthesizeSpeech({
+          provider: settings.provider,
+          apiKey: activeKey(settings),
+          text: line,
+          voice: currentVoice(),
+        });
+        await playBlob(blob);
+        return;
+      } catch {
+        setStatus('Głos dostawcy niedostępny. Czytam głosem telefonu.');
+      }
+    }
+    await speakBrowser(line, { lang: 'en-GB', rate: slow ? 0.9 : 0.96 });
+  } finally {
+    if (gen === speakGen) {
+      ui.speaking = false;
+      paintListen();
     }
   }
-  await speakBrowser(line, { lang: 'en-GB', rate: slow ? 0.9 : 0.96 });
 }
 
 async function playBlob(blob) {
@@ -1168,7 +1343,11 @@ async function playBlob(blob) {
   audioEl.src = currentObjectUrl;
   await audioEl.play();
   await new Promise((resolve, reject) => {
-    audioEl.onended = resolve;
+    const finish = () => resolve();
+    audioEl.onended = finish;
+    audioEl.onpause = () => {
+      if (audioEl.ended || audioEl.currentTime > 0) finish();
+    };
     audioEl.onerror = () => reject(new Error('audio'));
   });
 }

@@ -41,8 +41,57 @@ export const TOPICS = [
   },
 ];
 
+export const SCENARIOS = [
+  {
+    id: 'induction',
+    pl: 'Wejście na budowę',
+    hint: 'Kim jesteś i co dziś robisz',
+    goal: 'Przedstawić się brygadziście: imię, zawód, uprawnienia i dzisiejsza robota.',
+    en: 'a site induction with the foreman in Norway: who Jacek is, his tickets, and what he will do today',
+  },
+  {
+    id: 'fault',
+    pl: 'Usterka u klienta',
+    hint: 'Wyjaśnij, co nie działa',
+    goal: 'Spokojnie wyjaśnić klientowi usterkę, co już sprawdziłeś i co będzie dalej.',
+    en: 'explaining an electrical fault to a client in plain British English, without jargon they cannot follow',
+  },
+  {
+    id: 'eicr',
+    pl: 'Pomiary i EICR',
+    hint: 'Testy i protokół',
+    goal: 'Opowiedzieć o bezpiecznym odłączeniu, pomiarach i tym, co wpisujesz do protokołu.',
+    en: 'testing and certification: safe isolation, dead tests, and talking through an EICR in British terms',
+  },
+  {
+    id: 'toolbox',
+    pl: 'Odprawa BHP',
+    hint: 'Krótka rozmowa o ryzyku',
+    goal: 'Powiedzieć o zagrożeniu na dziś i co ekipa ma zrobić.',
+    en: 'a short toolbox talk: one hazard on today’s job and what the crew should do about it',
+  },
+  {
+    id: 'interview',
+    pl: 'Rozmowa o pracę',
+    hint: 'Doświadczenie i dlaczego Ty',
+    goal: 'Odpowiedzieć jak na rozmowie: doświadczenie, uprawnienia i dlaczego ta robota.',
+    en: 'a job interview for an electrician: experience, tickets, and why he wants the job',
+  },
+  {
+    id: 'supplier',
+    pl: 'Telefon do hurtowni',
+    hint: 'Zamów albo dopytaj',
+    goal: 'Zadzwonić do hurtowni: czego potrzebujesz, na kiedy i dokąd to ma przyjechać.',
+    en: 'a phone call with an electrical supplier: parts, sizes, delivery to site, and a polite chase',
+  },
+];
+
 export function topicById(id) {
   return TOPICS.find((topic) => topic.id === id) || null;
+}
+
+export function scenarioById(id) {
+  return SCENARIOS.find((scenario) => scenario.id === id) || null;
 }
 
 export function buildSystemPrompt({ level, polishHints }) {
@@ -50,24 +99,26 @@ export function buildSystemPrompt({ level, polishHints }) {
     ? 'why_pl is one short sentence in Polish for a native speaker. Explain the grammar or the word, not a lecture. If there is nothing to explain, use an empty string.'
     : 'The learner turned Polish hints off. Always set why_pl to an empty string. The reply stays in English.';
 
-  return `You are a conversation partner for Jacek, a Polish electrician and electrical engineer working on sites in Norway. He is learning spoken British English. The phone app around you is in Polish. You do not teach in Polish, and you do not write Polish in the reply.
+  return `You are Sam, a friendly native British electrician and site engineer in your forties. You are chatting with Jacek, a Polish electrician and electrical engineer on sites in Norway. He is learning spoken British English. The phone app around you is in Polish. You do not teach in Polish, and you do not write Polish in the reply.
 
-Talk like a friendly colleague from England: warm, plain, modern British English. Not American, not a posh caricature, not a teacher with a red pen. This is a loose chat, not a quiz and not a drill.
+Sound like a person on the tools, not a course. Warm, plain, modern British English. Contractions. British spelling (favourite, metre, organised). The odd natural idiom is welcome when it fits: sorted, cheers, spot on, give us a shout, knock off, on the tools. Not American, not posh, not a cartoon cockney, not a teacher with a red pen.
 
-Use British electrical language when the work comes up: consumer unit, distribution board, RCD, RCBO, MCB, earthing, earth, live, neutral, socket outlet, cable tray, trunking, conduit, isolator, safe isolation, and so on. If he uses an American term (breaker panel, outlet, ground, hot, GFCI), answer with the British term and treat that as a correction. His sites are in Norway; do not pretend he is in Britain, and do not correct Norwegian site life. The English he is aiming for is still British.
+Use British electrical language when the work comes up: consumer unit, distribution board, RCD, RCBO, MCB, earthing, earth, live, neutral, socket outlet, cable tray, trunking, conduit, isolator, safe isolation, EICR. If he uses an American term (breaker panel, outlet, ground, hot, GFCI), answer with the British term and treat that as a correction. His sites are in Norway; do not pretend he is in Britain, and do not correct Norwegian site life. The English he is aiming for is still British.
 
 His level today is ${level} on the CEFR scale.
-- A2: short sentences, common words, one idea at a time, still like a person.
-- B1: everyday site and life language, clear, not childish.
-- B2: natural pace, the odd idiom, still kind.
-- C1: a normal colleague, light humour is welcome.
+- A2: very short sentences, common words, one idea, still like a mate.
+- B1: everyday site language, clear, not childish.
+- B2: natural pace, a light idiom, still kind.
+- C1: a normal colleague. Dry humour is fine.
+
+If a scenario goal was given, stay in that situation and help him practise it. Do not announce the goal.
 
 Each turn:
-1. Answer what he actually said. Keep the chat going with exactly one follow-up question. Do not stack questions.
-2. If his grammar, word choice, or phrasing is unnatural, use the better British phrasing yourself inside the reply. Do not say "wrong", do not score him, do not list rules out loud. Put the detail in corrections. heard must be a short exact span from his last message, not your paraphrase.
-3. If his English is fine, corrections is an empty array. Never invent a mistake.
-4. phrases has at most two useful chunks from this turn (a trade term, a British phrase, or the better wording from a correction). Skip words he already handled well and skip trivial words. pl is a real Polish translation. example is one natural British sentence.
-5. reply is spoken aloud. No markdown, no lists, no labels, no Polish, no stage directions. Two to four sentences.
+1. Answer what he actually said. One to three short spoken sentences. Exactly one follow-up question. Never two questions.
+2. Correct only the single most useful mistake, or two if both would trip him up on site. Use the better British phrasing inside the reply. Do not say "wrong", do not score him, do not list rules out loud. heard must be a short exact span from his last message.
+3. If his English is fine, corrections is an empty array. Never invent a mistake. Never correct more than two things.
+4. phrases has at most two useful chunks (a trade term, a British phrase, or the better wording). Skip words he already handled. pl is a real Polish translation. example is one natural British sentence.
+5. reply is spoken aloud. No markdown, no lists, no labels, no Polish, no stage directions.
 
 ${hints}
 
@@ -76,7 +127,8 @@ Return only a JSON object:
 }
 
 export function topicKickoff(topic) {
-  return `Let's start a fresh conversation. The situation: ${topic.en}. Open naturally in British English, as if we have just started chatting, and ask me one question I can answer from my own work or life. Do not mention that you were given a topic.`;
+  const goal = topic.goal ? ` The practice goal: ${topic.goal}` : '';
+  return `Let's start a fresh conversation. The situation: ${topic.en}.${goal} Open naturally in British English, in character, as if we have just started chatting, and ask me one question I can answer from my own work or life. Do not mention that you were given a topic or a goal.`;
 }
 
 export function messagesForApi(messages, system) {
@@ -120,7 +172,7 @@ export function parseTutorReply(raw) {
           why_pl: asText(item?.why_pl),
         }))
         .filter((item) => item.better)
-        .slice(0, 4)
+        .slice(0, 2)
     : [];
   const phrases = Array.isArray(parsed.phrases)
     ? parsed.phrases
@@ -130,7 +182,7 @@ export function parseTutorReply(raw) {
           example: asText(item?.example).slice(0, 220),
         }))
         .filter((item) => item.en && item.pl)
-        .slice(0, 3)
+        .slice(0, 2)
     : [];
   return { reply: asText(parsed.reply), corrections, phrases };
 }

@@ -1,4 +1,4 @@
-import { topicById } from './tutor.js';
+import { scenarioById, topicById } from './tutor.js';
 
 function turn(reply, corrections = [], phrases = []) {
   return {
@@ -48,6 +48,36 @@ const OPENERS = {
     'We can talk about whatever you like — the job, the day, something that annoyed you. What is on your mind?',
     [],
     [],
+  ),
+  induction: turn(
+    "Morning. I'm Sam. Before you go on the tools, who are you and what are you on today?",
+    [],
+    [{ en: 'on the tools', pl: 'przy robocie, na narzędziach', example: 'I will be on the tools after the induction.' }],
+  ),
+  fault: turn(
+    'Right, imagine the client is stood there looking worried. What is not working, in one plain sentence?',
+    [],
+    [{ en: 'packed up', pl: 'przestało działać', example: 'The lights in the kitchen have packed up.' }],
+  ),
+  eicr: turn(
+    'Testing, then. Have you done safe isolation, or are you already writing the EICR?',
+    [],
+    [{ en: 'safe isolation', pl: 'bezpieczne odłączenie napięcia', example: 'Safe isolation before the cover comes off.' }],
+  ),
+  toolbox: turn(
+    'Toolbox talk. Keep it short. What is the one hazard you want the crew to remember today?',
+    [],
+    [{ en: 'toolbox talk', pl: 'krótka odprawa BHP', example: 'We had a toolbox talk about isolation.' }],
+  ),
+  interview: turn(
+    'Interview hat on. In a couple of sentences, what sort of electrical work have you been doing?',
+    [],
+    [{ en: 'hands-on', pl: 'praktyczny, przy robocie', example: 'Most of my work is hands-on installation.' }],
+  ),
+  supplier: turn(
+    'You are on the phone to the wholesaler. What do you need, and when does it have to be on site?',
+    [],
+    [{ en: 'on site', pl: 'na budowie', example: 'Can you get it on site by Thursday?' }],
   ),
 };
 
@@ -172,7 +202,7 @@ function scripted(text) {
 export function demoReply(userText, topicId) {
   const text = String(userText || '').trim();
   if (!text) {
-    const topic = topicById(topicId);
+    const topic = topicById(topicId) || scenarioById(topicId);
     const opener = (topic && OPENERS[topic.id]) || OPENERS.free;
     return structuredClone(opener);
   }

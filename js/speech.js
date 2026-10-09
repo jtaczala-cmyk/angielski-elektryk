@@ -228,14 +228,14 @@ export function speakBrowser(text, { lang = 'en-GB', rate = 0.96 } = {}) {
  * Fresh recognizer every time. On iOS, reusing one after HTML audio has played
  * can hang with no result and no error (WebKit bug 321436).
  */
-export function startBrowserRecognition({ lang = 'en-GB', onPartial, onStart, onError, onEnd, win = globalThis } = {}) {
+export function startBrowserRecognition({ lang = 'en-GB', continuous = true, onPartial, onStart, onError, onEnd, win = globalThis } = {}) {
   const Ctor = getRecognitionCtor(win);
   if (!Ctor) throw new Error('no-recognition');
   const recognition = new Ctor();
   recognition.lang = lang;
   recognition.interimResults = true;
   try {
-    recognition.continuous = true;
+    recognition.continuous = Boolean(continuous);
   } catch {
     /* Some Safari builds reject continuous; one utterance still works. */
   }

@@ -48,7 +48,37 @@ const iPhone = {
   hasTouch: true,
 };
 
+const SAFE_PLAY = `
+  const proto = window.HTMLMediaElement && HTMLMediaElement.prototype;
+  if (proto && !proto.__aePlay) {
+    proto.__aePlay = true;
+    try {
+      const srcDesc = Object.getOwnPropertyDescriptor(proto, 'src');
+      if (srcDesc && srcDesc.set) {
+        Object.defineProperty(proto, 'src', {
+          configurable: true,
+          get() { return srcDesc.get.call(this); },
+        set(value) {
+          if (typeof value === 'string' && (value.startsWith('data:audio') || value.startsWith('blob:'))) {
+            this.__src = value;
+            return;
+          }
+          srcDesc.set.call(this, value);
+        },
+        });
+      }
+    } catch { /* src stays writable */ }
+    proto.play = function play() {
+      window.__htmlPlays = (window.__htmlPlays || 0) + 1;
+      const el = this;
+      setTimeout(() => { if (typeof el.onended === 'function') el.onended(); }, 10);
+      return Promise.resolve();
+    };
+  }
+`;
+
 const HANGING_RECOGNITION = `
+  ${SAFE_PLAY}
   class FakeRecognition {
     start() {}
     stop() { this.onend?.(); }
@@ -168,6 +198,7 @@ try {
 
   const voice = await browser.newContext({ ...iPhone, locale: 'pl-PL' });
   await voice.addInitScript(`
+    ${SAFE_PLAY}
     localStorage.setItem('ae.settings.v1', JSON.stringify({
       provider: 'xai',
       xaiKey: 'xai-test-key',
@@ -248,13 +279,91 @@ try {
   const voiceReport = await stuck.locator('#diagnostics').innerText();
   console.log('voice diagnose:\\n', voiceReport);
   if (!/Głos Sama \(xAI\): nie zagrał/.test(voiceReport)) fail(`provider voice test did not report failure:\\n${voiceReport}`);
+  await stuck.locator('#voice-details').click();
+  const trace = await stuck.locator('#voice-trace').innerText();
+  console.log('voice trace:\\n', trace);
+  if (!/TimeoutError|TypeError|speech-did-not-start|audio-/i.test(trace)) fail(`Szczegóły missed the failing path:\\n${trace}`);
   await stuck.evaluate(() => {
     const scroller = document.querySelector('.scroll');
     if (scroller) scroller.scrollTop = 0;
   });
-  await stuck.screenshot({ path: join(OUT, 'screenshot_ios_voice_report.png') });
+  await stuck.screenshot({ path: join(OUT, 'screenshot_ios_voice_trace.png') });
   if (pageErrors.length) fail(`voice page errors:\\n${pageErrors.join('\\n')}`);
   await voice.close();
+
+  const wav = new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0x25, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45,
+    0x66, 0x6d, 0x74, 0x20, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x40, 0x1f, 0x00, 0x00, 0x40, 0x1f, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00,
+    0x64, 0x61, 0x74, 0x61, 0x01, 0x00, 0x00, 0x00, 0x80,
+  ]);
+  const heard = await browser.newContext({ ...iPhone, locale: 'pl-PL' });
+  await heard.addInitScript(`
+    ${SAFE_PLAY}
+    localStorage.setItem('ae.settings.v1', JSON.stringify({
+      provider: 'xai',
+      xaiKey: 'xai-test-key',
+      level: 'B2',
+      autoSpeak: true,
+      confirmBeforeSend: false,
+      sendMode: 'manual',
+      voiceMode: 'provider',
+      inputMode: 'type',
+    }));
+    const wav = new Uint8Array(${JSON.stringify([...wav])});
+    const origFetch = window.fetch.bind(window);
+    window.fetch = (url) => {
+      const target = String(url);
+      if (target.includes('/tts') || target.includes('/audio/speech')) {
+        return Promise.resolve(new Response(wav, { status: 200, headers: { 'content-type': 'audio/wav' } }));
+      }
+      if (target.includes('/chat/completions')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          choices: [{ message: { content: '{"reply":"Morning. Set the Megger to five hundred volts.","corrections":[],"phrases":[]}' } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } }));
+      }
+      return origFetch(url);
+    };
+    if (window.speechSynthesis) {
+      window.speechSynthesis.speak = function speak() {};
+      window.speechSynthesis.cancel = function cancel() {};
+      window.speechSynthesis.getVoices = () => [{ name: 'Daniel', lang: 'en-GB' }];
+    }
+  `);
+  const sam = await heard.newPage();
+  const samErrors = [];
+  sam.on('pageerror', (err) => samErrors.push(String(err)));
+  await sam.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' });
+  await dismissOnboarding(sam);
+  await sam.waitForSelector('#talk');
+  await sam.locator('#draft').fill('Explain.');
+  await sam.locator('#send').click();
+  await sam.waitForSelector('.msg-assistant');
+  await sam.waitForFunction(() => (
+    (window.__htmlPlays || 0) >= 2
+    || /Nie udało się odtworzyć/.test(document.querySelector('.error')?.textContent || '')
+  ), null, { timeout: 12000 });
+  const played = await sam.evaluate(() => ({
+    plays: window.__htmlPlays || 0,
+    status: document.querySelector('#status')?.textContent || '',
+    error: document.querySelector('.error')?.textContent || '',
+    talk: Boolean(document.querySelector('#talk')),
+  }));
+  console.log('sam playback', played);
+  if (!played.talk) fail('talk button missing after Sam spoke');
+  if (/Nie udało się odtworzyć/.test(played.error) || /Nie udało się odtworzyć/.test(played.status)) {
+    fail(`provider audio was not heard:\\n${played.status}\\n${played.error}`);
+  }
+  if (played.plays < 1) fail('unlocked audio element never played');
+  await sam.locator('#nav-settings').click();
+  await sam.locator('#voice-details').click();
+  const samTrace = await sam.locator('#voice-trace').innerText();
+  console.log('sam trace:\\n', samTrace);
+  if (!/wynik: html/.test(samTrace)) fail(`expected html playback in Szczegóły:\\n${samTrace}`);
+  if (!/prime: gest/.test(samTrace)) fail(`speechSynthesis was not primed inside the tap:\\n${samTrace}`);
+  await sam.screenshot({ path: join(OUT, 'screenshot_ios_sam_played.png') });
+  if (samErrors.length) fail(`sam page errors:\\n${samErrors.join('\\n')}`);
+  await heard.close();
 } finally {
   await browser.close();
   server.close();

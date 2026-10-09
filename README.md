@@ -56,7 +56,7 @@ Safari on iOS has `webkitSpeechRecognition` since iOS 14.5, including iOS 26, wi
 
 From the Home Screen icon, that API is present but often never starts and never reports an error. The app records with `MediaRecorder` instead and sends `audio/mp4` (`.m4a`) to the provider. That path needs an API key. Without a key, type the sentence; trial mode still answers.
 
-WebKit bug 321436 (still present on iOS 26): playing an `<audio>` element makes the next `SpeechRecognition.start()` hang with no result and no error. The app unlocks sound with `AudioContext` and plays provider audio through Web Audio, not the `<audio>` tag. If recognition does not fire `onstart` within 2.5s, a Polish message stays on screen and the next tap records.
+WebKit bug 321436 (still present on iOS 26): playing an `<audio>` element makes the next `SpeechRecognition.start()` hang with no result and no error. The app unlocks sound inside the tap with `AudioContext` (a silent buffer, not the `<audio>` tag) and plays provider audio through Web Audio. If that audio does not start within a few seconds, or the request hangs, playback stops and the iPhone `en-GB` voice is used instead. Speaking always ends on a timer based on the length of the line, and **Przerwij** ends it immediately, so the talk button cannot stay hidden behind “Mówię…”. **Sprawdź telefon** plays Sam’s provider voice and says in Polish whether it started.
 
 xAI does publish `POST /v1/tts` and `POST /v1/stt`. If either call fails (including 404), speech out falls back to `speechSynthesis` in `en-GB`, and speech in asks him to type. Provider requests time out after 30s so a hung call cannot leave the talk button stuck.
 

@@ -22,6 +22,8 @@ import {
   pickBritishVoice,
   pickRecorderMime,
   recognitionProblem,
+  speakBudget,
+  withTimeout,
 } from '../js/speech.js';
 import { dueCards, ensureSeed, reviewCard, slug, upsertPhrase } from '../js/srs.js';
 import { createMemoryStore, loadSettings, saveSettings } from '../js/storage.js';
@@ -337,7 +339,7 @@ test('demo conversation corrects a typical Polish-English sentence', () => {
   assert.equal(topic.corrections.length, 0);
 });
 
-test('speech path prefers British voices and iPhone mp4 recordings', () => {
+test('speech path prefers British voices and iPhone mp4 recordings', async () => {
   const voice = pickBritishVoice([
     { name: 'Samantha', lang: 'en-US' },
     { name: 'Daniel', lang: 'en-GB' },
@@ -354,6 +356,10 @@ test('speech path prefers British voices and iPhone mp4 recordings', () => {
   assert.match(recognitionProblem('not-allowed'), /Mikrofon|Dyktowanie|mikrofonu/i);
   assert.match(recognitionProblem('no-start', { standalone: true, hasKey: false }), /klucza/);
   assert.match(recognitionProblem('network'), /internetu/);
+  assert.equal(speakBudget('Hi'), 4500);
+  assert.equal(speakBudget('x'.repeat(400)), 20000);
+  const hung = withTimeout(new Promise(() => {}), 20);
+  await assert.rejects(hung, /timeout/);
 });
 
 test('the static site uses relative paths and does not contain a key', () => {

@@ -165,6 +165,96 @@ try {
     console.error('standalone failed', err);
     process.exitCode = 1;
   }
+
+  const voice = await browser.newContext({ ...iPhone, locale: 'pl-PL' });
+  await voice.addInitScript(`
+    localStorage.setItem('ae.settings.v1', JSON.stringify({
+      provider: 'xai',
+      xaiKey: 'xai-test-key',
+      level: 'C1',
+      autoSpeak: true,
+      polishHints: true,
+      confirmBeforeSend: false,
+      sendMode: 'manual',
+      voiceMode: 'provider',
+      inputMode: 'type',
+    }));
+    const origFetch = window.fetch.bind(window);
+    window.fetch = (url, init) => {
+      const target = String(url);
+      if (target.includes('/tts') || target.includes('/audio/speech')) return new Promise(() => {});
+      if (target.includes('/models')) {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'invalid key' }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        }));
+      }
+      if (target.includes('/chat/completions')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          choices: [{ message: { content: '{"reply":"Morning. Can you hear me on site?","corrections":[],"phrases":[]}' } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } }));
+      }
+      return origFetch(url, init);
+    };
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) {
+      AC.prototype.resume = function resume() { return new Promise(() => {}); };
+      AC.prototype.decodeAudioData = function decode() { return new Promise(() => {}); };
+    }
+    if (window.speechSynthesis) {
+      window.speechSynthesis.speak = function speak() {};
+      window.speechSynthesis.cancel = function cancel() {};
+      window.speechSynthesis.getVoices = () => [{ name: 'Daniel', lang: 'en-GB' }];
+    }
+  `);
+  const stuck = await voice.newPage();
+  const pageErrors = [];
+  stuck.on('pageerror', (err) => pageErrors.push(String(err)));
+  await stuck.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' });
+  await stuck.waitForSelector('#talk');
+  await stuck.locator('#draft').fill('Hello hello');
+  await stuck.locator('#send').click();
+  await stuck.waitForSelector('.msg-assistant');
+  await stuck.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('Mówię'), null, { timeout: 6000 });
+  const during = await stuck.evaluate(() => {
+    const talk = document.querySelector('#talk');
+    const box = talk?.getBoundingClientRect();
+    return {
+      talk: Boolean(talk),
+      visible: Boolean(box && box.width > 20 && box.bottom > 0),
+      przerwij: document.querySelector('#stop-speech')?.hidden === false,
+    };
+  });
+  console.log('while speaking', during);
+  if (!during.talk || !during.visible) fail(`talk button missing while speaking: ${JSON.stringify(during)}`);
+  if (!during.przerwij) fail('Przerwij was not shown while speaking');
+  await stuck.screenshot({ path: join(OUT, 'screenshot_ios_przerwij.png') });
+  await stuck.locator('#stop-speech').click();
+  await stuck.waitForFunction(() => !document.querySelector('#status')?.textContent?.includes('Mówię'), null, { timeout: 4000 });
+  const after = await stuck.locator('#talk').isVisible();
+  if (!after) fail('talk button missing after Przerwij');
+  await stuck.locator('#draft').fill('Hello again');
+  await stuck.locator('#send').click();
+  await stuck.waitForFunction(() => /Nie udało się odtworzyć głosu/.test(document.querySelector('#status')?.textContent || ''), null, { timeout: 15000 });
+  const recovered = await stuck.evaluate(() => {
+    const talk = document.querySelector('#talk');
+    const box = talk?.getBoundingClientRect();
+    return Boolean(talk && box && box.width > 20 && box.bottom > 0 && !talk.disabled);
+  });
+  if (!recovered) fail('talk button did not return after the voice gave up');
+  await stuck.locator('#nav-settings').click();
+  await stuck.locator('#diagnose').click();
+  await stuck.waitForFunction(() => /Głos Sama/.test(document.querySelector('#diagnostics')?.textContent || ''), null, { timeout: 25000 });
+  const voiceReport = await stuck.locator('#diagnostics').innerText();
+  console.log('voice diagnose:\\n', voiceReport);
+  if (!/Głos Sama \(xAI\): nie zagrał/.test(voiceReport)) fail(`provider voice test did not report failure:\\n${voiceReport}`);
+  await stuck.evaluate(() => {
+    const scroller = document.querySelector('.scroll');
+    if (scroller) scroller.scrollTop = 0;
+  });
+  await stuck.screenshot({ path: join(OUT, 'screenshot_ios_voice_report.png') });
+  if (pageErrors.length) fail(`voice page errors:\\n${pageErrors.join('\\n')}`);
+  await voice.close();
 } finally {
   await browser.close();
   server.close();

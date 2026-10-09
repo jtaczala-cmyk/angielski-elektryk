@@ -13,15 +13,22 @@ import {
   mediaRecorderSupported,
   pathLabel,
   pickRecorderMime,
+  htmlAudioReady,
+  noteVoice,
+  playHtmlAudio,
   playWithWebAudio,
+  preferPlaybackSession,
+  primeSpeechSynthesis,
   recognitionProblem,
-  sharedAudioContext,
   speakBrowser,
   speakBudget,
   startBrowserRecognition,
   stopBrowserSpeech,
   stopProviderPlayback,
+  suspendSpeechBridge,
   unlockAudio,
+  unlockHtmlAudio,
+  voiceTrace,
   withTimeout,
 } from './speech.js';
 import { demoReply } from './demo.js';
@@ -81,6 +88,7 @@ let speakGen = 0;
 let speakCancel = false;
 let silenceTimer = 0;
 let silenceFrame = 0;
+let meterContext = null;
 let autoSendTimer = 0;
 let recordCap = 0;
 let handsFreeArmed = false;
@@ -349,6 +357,8 @@ function reviewBar() {
     const text = field.value || ui.pending;
     cancelAutoSend();
     ui.pending = '';
+    stopSpeaking();
+    armVoice('wyślij-recenzja', { html: true });
     submitText(text);
   });
   const alt = el('div', 'review-alt');
@@ -395,9 +405,19 @@ function armAutoSend() {
   tick();
 }
 
+function closeMeter() {
+  const ctx = meterContext;
+  meterContext = null;
+  if (!ctx) return;
+  try { ctx.close(); } catch { /* already closed */ }
+}
+
 function watchRecorderSilence(stream) {
   try {
-    const ctx = sharedAudioContext();
+    closeMeter();
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    const ctx = Ctor ? new Ctor() : null;
+    meterContext = ctx;
     if (!ctx || !stream) return;
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
@@ -492,8 +512,8 @@ function finishSession() {
 async function startScenario(scenario) {
   if (ui.busy) return;
   ui.scenario = scenario;
-  unlockAudio(audioEl);
   stopSpeaking();
+  armVoice('scenariusz', { html: true });
   showMessage({
     id: uid(),
     role: 'note',
@@ -866,22 +886,43 @@ function inputPath() {
   });
 }
 
-function showProblem(text) {
+function errorBlock() {
+  const box = el('div', 'error-block');
+  box.append(el('p', 'error', ui.error));
+  if (ui.voiceDetail) {
+    const toggle = el('button', 'text-btn', 'Szczegóły');
+    toggle.type = 'button';
+    toggle.id = 'error-details';
+    const pre = el('pre', 'voice-detail', ui.voiceDetail);
+    pre.id = 'error-trace';
+    pre.hidden = true;
+    toggle.addEventListener('click', () => {
+      pre.hidden = !pre.hidden;
+    });
+    box.append(toggle, pre);
+  }
+  return box;
+}
+
+function showProblem(text, detail) {
   ui.error = text;
+  if (detail) ui.voiceDetail = detail;
   setStatus(text);
   const screen = document.querySelector('.screen');
   if (!screen) return;
-  let node = screen.querySelector('.error');
-  if (!node) {
-    node = el('p', 'error', text);
+  const fresh = errorBlock();
+  const node = screen.querySelector('.error-block') || screen.querySelector('.error');
+  if (node) node.replaceWith(fresh);
+  else {
     const dock = screen.querySelector('.dock');
-    if (dock) screen.insertBefore(node, dock);
-    else screen.append(node);
-  } else node.textContent = text;
+    if (dock) screen.insertBefore(fresh, dock);
+    else screen.append(fresh);
+  }
 }
 
 function clearProblem() {
   ui.error = '';
+  document.querySelector('.screen .error-block')?.remove();
   document.querySelector('.screen .error')?.remove();
 }
 
@@ -925,7 +966,7 @@ function renderTalk() {
   });
   screen.append(transcript);
 
-  if (ui.error) screen.append(el('p', 'error', ui.error));
+  if (ui.error) screen.append(errorBlock());
   if (shouldShowHeard()) screen.append(heardBanner());
 
   const dock = el('div', 'dock');
@@ -1029,13 +1070,22 @@ function emptyState() {
     button.type = 'button';
     button.lang = 'en-GB';
     button.addEventListener('click', () => {
-      unlockAudio(audioEl);
+      stopSpeaking();
+      armVoice('zdanie', { html: true });
       submitText(line);
     });
     suggest.append(button);
   }
   box.append(suggest);
   return box;
+}
+
+function armVoice(reason, { html = false } = {}) {
+  const active = navigator.userActivation ? navigator.userActivation.isActive : undefined;
+  noteVoice('gest', `${reason} active=${active === undefined ? '?' : active}`);
+  unlockAudio();
+  if (html) unlockHtmlAudio(audioEl);
+  primeSpeechSynthesis();
 }
 
 function messageView(message, index) {
@@ -1068,8 +1118,11 @@ function messageView(message, index) {
     const replay = el('button', 'text-btn', 'Odsłuchaj');
     replay.type = 'button';
     replay.addEventListener('click', () => {
-      unlockAudio(audioEl);
-      speak(message.text);
+      stopSpeaking();
+      armVoice('odsłuchaj', { html: true });
+      speak(message.text).then((heard) => {
+        if (heard === 'failed') showProblem('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie. Sprawdź dźwięk, stuknij Odsłuchaj, albo Ustawienia → Sprawdź telefon.', voiceTrace());
+      });
     });
     tools.append(replay);
     article.append(tools);
@@ -1187,7 +1240,8 @@ function dueView() {
   practise.type = 'button';
   practise.addEventListener('click', (event) => {
     event.stopPropagation();
-    unlockAudio(audioEl);
+    stopSpeaking();
+    armVoice('powiedz', { html: true });
     practisePhrase(card);
   });
   back.append(practise);
@@ -1201,7 +1255,8 @@ function dueView() {
   const say = el('button', 'text-btn', 'Wymowa');
   say.type = 'button';
   say.addEventListener('click', () => {
-    unlockAudio(audioEl);
+    stopSpeaking();
+    armVoice('wymowa', { html: true });
     const line = card.example ? `${card.en}. ${card.example}` : card.en;
     speak(line, { slow: true });
   });
@@ -1275,8 +1330,12 @@ function wordList(query) {
     const say = el('button', 'text-btn', 'Wymowa');
     say.type = 'button';
     say.addEventListener('click', () => {
-      unlockAudio(audioEl);
-      speak(card.example ? `${card.en}. ${card.example}` : card.en, { slow: true });
+      stopSpeaking();
+      armVoice('wymowa', { html: true });
+      const line = card.example ? `${card.en}. ${card.example}` : card.en;
+      speak(line, { slow: true }).then((heard) => {
+        if (heard === 'failed') showProblem('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie. Sprawdź dźwięk, stuknij Odsłuchaj, albo Ustawienia → Sprawdź telefon.', voiceTrace());
+      });
     });
     item.append(say);
     item.append(el('em', null, card.pl));
@@ -1341,7 +1400,7 @@ function probeRecognition() {
   });
 }
 
-async function diagnose(button, report) {
+async function diagnose(button, report, trace) {
   button.disabled = true;
   report.hidden = false;
   const lines = [];
@@ -1383,11 +1442,11 @@ async function diagnose(button, report) {
   if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) lines.push('Głos iPhone’a: brak.');
   else {
     try {
-      unlockAudio();
       await speakBrowser('Test.', { lang: 'en-GB', rate: 1 });
       lines.push('Głos iPhone’a: próba „Test” skończona. Jeśli była cisza, włącz dźwięk i stuknij jeszcze raz.');
-    } catch {
-      lines.push('Głos iPhone’a: nie zagrał. Włącz dźwięk, stuknij ekran i spróbuj ponownie.');
+    } catch (err) {
+      noteVoice('browser', err?.name || err?.message || 'error');
+      lines.push(`Głos iPhone’a: nie zagrał (${err?.name || 'error'}). Włącz dźwięk, stuknij ekran i spróbuj ponownie.`);
     }
   }
   const key = activeKey(settings);
@@ -1408,16 +1467,18 @@ async function diagnose(button, report) {
   } else {
     const who = settings.provider === 'xai' ? 'xAI' : 'OpenAI';
     try {
-      unlockAudio();
-      await withTimeout(playProviderClip('Hello from site.'), Math.min(8000, speakBudget('Hello from site.')));
-      lines.push(`Głos Sama (${who}): zagrał. Jeśli była cisza, wyłącz tryb cichy — przełącznik z boku iPhone’a.`);
+      const kind = await withTimeout(playProviderClip('Hello from site.'), Math.min(12000, speakBudget('Hello from site.') + 4000));
+      lines.push(`Głos Sama (${who}): zagrał (${kind}). Jeśli była cisza, wyłącz tryb cichy — przełącznik z boku iPhone’a.`);
     } catch (err) {
+      noteVoice('wynik', err?.name || err?.message || 'error');
       const why = err?.name === 'TimeoutError' || err?.message === 'timeout'
         ? 'Połączenie albo odtwarzanie trwało za długo.'
         : 'Odtwarzanie nie wystartowało.';
-      lines.push(`Głos Sama (${who}): nie zagrał. ${why} Zostaje głos iPhone’a.`);
+      lines.push(`Głos Sama (${who}): nie zagrał. ${why} (${err?.name || 'error'}). Zostaje głos iPhone’a.`);
     }
   }
+  ui.voiceDetail = voiceTrace();
+  if (trace) trace.textContent = ui.voiceDetail;
   if (settings.provider === 'xai') {
     lines.push('xAI: rozmowa idzie do api.x.ai. Gdy nagranie albo głos dostawcy odpadnie, zostaje pisanie i głos iPhone’a (en-GB).');
   }
@@ -1440,8 +1501,22 @@ function renderSettings() {
   const report = el('p', 'diagnostics', ui.diagnostics || '');
   report.id = 'diagnostics';
   if (!ui.diagnostics) report.hidden = true;
-  test.addEventListener('click', () => diagnose(test, report));
-  doctor.append(test, report);
+  const detailsBtn = el('button', 'text-btn', 'Szczegóły');
+  detailsBtn.type = 'button';
+  detailsBtn.id = 'voice-details';
+  const trace = el('pre', 'voice-detail', ui.voiceDetail || '');
+  trace.id = 'voice-trace';
+  trace.hidden = true;
+  detailsBtn.addEventListener('click', () => {
+    trace.hidden = !trace.hidden;
+    trace.textContent = voiceTrace() || 'Brak. Stuknij Sprawdź telefon albo powiedz zdanie, a tu pojawi się, która ścieżka głosu padła.';
+  });
+  test.addEventListener('click', () => {
+    stopSpeaking();
+    armVoice('sprawdź', { html: true });
+    diagnose(test, report, trace);
+  });
+  doctor.append(test, detailsBtn, report, trace);
   scroll.append(doctor);
 
   const connection = el('section', 'panel');
@@ -1763,8 +1838,8 @@ function newChat() {
 async function startTopic(topic) {
   if (ui.busy) return;
   ui.scenario = { id: topic.id, pl: topic.pl, goal: topic.goal || '' };
-  unlockAudio(audioEl);
   stopSpeaking();
+  armVoice('temat', { html: true });
   showMessage({ id: uid(), role: 'note', text: `Temat: ${topic.pl}`, at: Date.now() });
   await submitText(topicKickoff(topic), { hidden: true, topicId: topic.id });
 }
@@ -1774,24 +1849,27 @@ function sendDraft() {
   const text = draft ? draft.value : '';
   cancelAutoSend();
   ui.pending = '';
-  unlockAudio(audioEl);
+  stopSpeaking();
+  armVoice('wyślij', { html: true });
   submitText(text);
 }
 
 async function onTalk() {
-  unlockAudio();
   if (ui.speaking) {
     interruptSpeech();
+    armVoice('mów-przerwij');
     return;
   }
   stopSpeaking();
   if (ui.busy) return;
   if (ui.listening) {
     stopListening(false);
+    armVoice('mów-stop');
     return;
   }
   clearProblem();
   const path = inputPath();
+  armVoice(path === 'browser' ? 'mów-dyktowanie' : 'mów', { html: path !== 'browser' });
   if (path === 'record' && !activeKey(settings)) {
     showProblem('Nagranie mogę wysłać tylko z kluczem API. Wpisz zdanie na dole albo dodaj klucz: Ustawienia → Klucz API.');
     document.getElementById('draft')?.focus();
@@ -1807,6 +1885,7 @@ async function onTalk() {
 }
 
 function startRecognition() {
+  suspendSpeechBridge();
   cancelListen = false;
   ui.listening = true;
   ui.pending = '';
@@ -1924,6 +2003,7 @@ function openRecorder(stream) {
 }
 
 async function startRecording() {
+  suspendSpeechBridge();
   cancelListen = false;
   ui.listening = true;
   ui.pending = '';
@@ -1948,6 +2028,7 @@ async function startRecording() {
       const blob = new Blob(recorderChunks, { type });
       cleanupStream();
       ui.listening = false;
+      setLive('');
       paintListen();
       if (cancelListen) {
         cancelListen = false;
@@ -2004,6 +2085,7 @@ function cleanupStream() {
   recorderStream?.getTracks().forEach((track) => track.stop());
   recorderStream = null;
   recorder = null;
+  closeMeter();
 }
 
 function abandonRecognizer() {
@@ -2077,13 +2159,12 @@ async function onHeard(text) {
 async function submitText(text, opts = {}) {
   const clean = String(text || '').trim();
   if (!clean || ui.busy) return;
-  unlockAudio();
   cancelAutoSend();
   ui.pending = '';
   document.getElementById('review')?.remove();
   const draft = document.getElementById('draft');
   if (draft && !opts.hidden) draft.value = '';
-  stopSpeaking();
+  stopProviderPlayback();
   abandonRecognizer();
   if (!opts.hidden) {
     markPractice();
@@ -2123,7 +2204,7 @@ async function submitText(text, opts = {}) {
       const heard = await speak(turn.reply);
       if (heard === 'played') spoke = true;
       else if (heard === 'failed') {
-        showProblem('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie. Sprawdź dźwięk, stuknij Odsłuchaj, albo Ustawienia → Sprawdź telefon.');
+        showProblem('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie. Sprawdź dźwięk, stuknij Odsłuchaj, albo Ustawienia → Sprawdź telefon.', voiceTrace());
       }
     }
     if (spoke && settings.heardSam !== 'yes') ui.heardPrompt = true;
@@ -2270,6 +2351,7 @@ function interruptSpeech() {
 }
 
 async function speak(text, { slow = false } = {}) {
+  setLive('');
   abandonRecognizer();
   const line = String(text || '').trim();
   if (!line) return 'stopped';
@@ -2303,8 +2385,9 @@ async function speak(text, { slow = false } = {}) {
       cancelled,
     ]);
     if (gen !== speakGen) return 'stopped';
-    if (outcome !== 'provider' && outcome !== 'browser') stopSpeaking();
-    return outcome === 'provider' || outcome === 'browser' || outcome === 'played' ? 'played' : outcome;
+    if (outcome !== 'web' && outcome !== 'html' && outcome !== 'browser') stopSpeaking();
+    if (outcome === 'failed') noteVoice('wynik', 'failed');
+    return outcome === 'web' || outcome === 'html' || outcome === 'browser' || outcome === 'played' ? 'played' : outcome;
   } finally {
     window.clearTimeout(timer);
     if (gen === speakGen) {
@@ -2315,19 +2398,76 @@ async function speak(text, { slow = false } = {}) {
   }
 }
 
+async function releaseMic() {
+  const tracks = recorderStream ? recorderStream.getTracks().filter((track) => track.readyState === 'live').length : 0;
+  const had = tracks > 0 || Boolean(recognizer) || Boolean(meterContext);
+  abandonRecognizer();
+  cleanupStream();
+  if (!had) return;
+  noteVoice('mic', `zatrzymane tory ${tracks}`);
+  await new Promise((resolve) => window.setTimeout(resolve, 300));
+}
+
+async function describeBlob(blob) {
+  let head = '';
+  try {
+    const bytes = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
+    head = Array.from(bytes).map((byte) => (byte >= 32 && byte < 127 ? String.fromCharCode(byte) : byte.toString(16))).join('');
+  } catch {
+    head = '?';
+  }
+  return `${blob.type || 'brak-typu'} ${blob.size}B ${head}`;
+}
+
+async function playBlob(blob, { slow = false, onStart } = {}) {
+  preferPlaybackSession();
+  const ios = isIos();
+  if (ios && htmlAudioReady()) {
+    noteVoice('web', 'pominięte, element audio odblokowany');
+    try {
+      await playHtmlAudio(audioEl, blob, onStart);
+      ui.recognitionBroken = true;
+      noteVoice('wynik', 'html');
+      return 'html';
+    } catch (err) {
+      noteVoice('html', err?.name || err?.message || 'error');
+    }
+  }
+  try {
+    await playWithWebAudio(blob, globalThis, onStart);
+    noteVoice('wynik', 'web');
+    return 'web';
+  } catch (err) {
+    noteVoice('web', err?.name || err?.message || 'error');
+  }
+  if (!ios && htmlAudioReady()) {
+    try {
+      await playHtmlAudio(audioEl, blob, onStart);
+      noteVoice('wynik', 'html');
+      return 'html';
+    } catch (err) {
+      noteVoice('html', err?.name || err?.message || 'error');
+    }
+  }
+  if (slow) noteVoice('tempo', 'wolno');
+  throw Object.assign(new Error('provider-audio'), { name: 'provider-audio' });
+}
+
 async function playReply(line, slow, onStart) {
   const gen = speakGen;
   const aborted = () => speakCancel || gen !== speakGen;
-  unlockAudio();
+  await releaseMic();
+  if (aborted()) return 'stopped';
   const useProvider = settings.voiceMode === 'provider' && activeKey(settings) && ui.providerSpeech !== false;
   if (useProvider) {
     try {
-      await withTimeout(playProviderClip(line, onStart), 5000);
+      const kind = await playProviderClip(line, onStart);
       if (aborted()) return 'stopped';
-      return 'provider';
+      return kind;
     } catch (err) {
       stopProviderPlayback();
       if (aborted()) return 'stopped';
+      if (!(err instanceof ProviderError)) noteVoice('provider', err?.name || err?.message || 'error');
       if (err instanceof ProviderError && (err.status === 404 || err.status === 405)) ui.providerSpeech = false;
       setStatus('Głos dostawcy niedostępny. Czytam głosem iPhone’a.');
     }
@@ -2335,21 +2475,31 @@ async function playReply(line, slow, onStart) {
   if (aborted()) return 'stopped';
   try {
     await speakBrowser(line, { lang: 'en-GB', rate: slow ? 0.9 : 0.96, onStart });
-  } catch {
+  } catch (err) {
+    noteVoice('browser', err?.name || err?.message || 'error');
     return aborted() ? 'stopped' : 'failed';
   }
   if (aborted()) return 'stopped';
+  noteVoice('wynik', 'browser');
   return 'browser';
 }
 
 async function playProviderClip(text, onStart) {
-  const blob = await withTimeout(synthesizeSpeech({
-    provider: settings.provider,
-    apiKey: activeKey(settings),
-    text,
-    voice: currentVoice(),
-  }), 8000);
-  await playWithWebAudio(blob, globalThis, onStart);
+  await releaseMic();
+  let blob;
+  try {
+    blob = await withTimeout(synthesizeSpeech({
+      provider: settings.provider,
+      apiKey: activeKey(settings),
+      text,
+      voice: currentVoice(),
+    }), 8000);
+  } catch (err) {
+    noteVoice('tts', err?.name || err?.message || 'error');
+    throw err;
+  }
+  noteVoice('tts', await describeBlob(blob));
+  return playBlob(blob, { onStart });
 }
 
 let speakStop = null;

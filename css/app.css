@@ -617,6 +617,23 @@ mark.heard {
   line-height: 1.4;
 }
 
+.error-block { margin: 8px 16px 0; }
+.error-block .error { margin: 0; }
+.error-block .text-btn { margin: 4px 0 0; }
+
+.voice-detail {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--card-solid);
+  color: var(--ink);
+  font: 12px/1.4 ui-monospace, monospace;
+  white-space: pre-wrap;
+  text-align: left;
+  max-height: 36vh;
+  overflow: auto;
+}
+
 .dock {
   flex: none;
   padding: 8px 16px 8px;

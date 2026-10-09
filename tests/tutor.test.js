@@ -238,6 +238,7 @@ test('speech and transcription requests match OpenAI and xAI', async () => {
   assert.equal(speech.url, 'https://api.openai.com/v1/audio/speech');
   assert.equal(speechBody.model, 'gpt-4o-mini-tts');
   assert.equal(speechBody.voice, 'coral');
+  assert.equal(speechBody.response_format, 'wav');
   assert.match(speechBody.instructions, /British/);
 
   const xaiSpeech = JSON.parse(buildSpeechRequest({
@@ -248,6 +249,8 @@ test('speech and transcription requests match OpenAI and xAI', async () => {
   }).init.body);
   assert.equal(xaiSpeech.voice_id, 'eve');
   assert.equal(xaiSpeech.language, 'en');
+  assert.equal(xaiSpeech.output_format.codec, 'wav');
+  assert.equal(xaiSpeech.output_format.sample_rate, 24000);
 
   const openaiStt = buildTranscriptionRequest({
     provider: 'openai',

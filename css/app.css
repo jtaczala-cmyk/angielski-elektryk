@@ -721,6 +721,9 @@ textarea {
 
 .talk:disabled { opacity: 0.55; }
 
+#stop-speech[hidden],
+#cancel-listen[hidden] { display: none !important; }
+
 .side-btn {
   border: 0;
   background: var(--card-solid);

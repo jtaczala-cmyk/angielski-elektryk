@@ -12,6 +12,7 @@ test('dictation junk with number runs is treated as garbled', () => {
   assert.equal(looksGarbled(GARBLED), true);
   assert.equal(looksGarbled('1234567890 hi'), true);
   assert.equal(looksGarbled('I am electrician and I work in Norway since two years.'), false);
+  assert.equal(looksGarbled('1234 do you hear me'), false);
   assert.equal(looksGarbled('I fitted two RCDs on level two.'), false);
   assert.equal(looksGarbled('Can you get 100 metres of 2.5?'), false);
 });

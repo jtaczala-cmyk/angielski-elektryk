@@ -99,9 +99,27 @@ export function pathLabel(path) {
 }
 
 let audioUnlocked = false;
+let synthPrimed = false;
 let unlockGate = Promise.resolve();
-
 let sharedContext = null;
+let activeSource = null;
+const speechWaiters = new Set();
+
+/** How long a spoken line may keep the screen in “Mówię…” before we give up. */
+export function speakBudget(text) {
+  const chars = String(text || '').trim().length;
+  return Math.min(20000, Math.max(4500, chars * 70));
+}
+
+export function withTimeout(promise, ms, win = globalThis) {
+  let timer = 0;
+  const timeout = new Promise((_, reject) => {
+    timer = win.setTimeout(() => reject(Object.assign(new Error('timeout'), { name: 'TimeoutError' })), ms);
+  });
+  const guarded = Promise.resolve(promise);
+  guarded.catch(() => {});
+  return Promise.race([guarded, timeout]).finally(() => win.clearTimeout(timer));
+}
 
 export function sharedAudioContext(win = globalThis) {
   if (sharedContext) return sharedContext;
@@ -116,45 +134,105 @@ export function sharedAudioContext(win = globalThis) {
  * on iOS 26 that hangs the next webkitSpeechRecognition with no error and no result.
  */
 export function unlockAudio() {
-  if (audioUnlocked) return unlockGate;
-  audioUnlocked = true;
   const ctx = sharedAudioContext();
-  const resumed = ctx && ctx.state === 'suspended' && typeof ctx.resume === 'function' ? ctx.resume() : Promise.resolve();
-  unlockGate = Promise.resolve(resumed).catch(() => {
-    audioUnlocked = false;
-  });
-  const synth = globalThis.speechSynthesis;
-  if (synth && typeof synth.speak === 'function' && globalThis.SpeechSynthesisUtterance) {
+  if (ctx) {
     try {
-      const blip = new globalThis.SpeechSynthesisUtterance(' ');
-      blip.volume = 0;
-      blip.lang = 'en-GB';
-      synth.resume?.();
-      synth.speak(blip);
+      if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+        const resumed = Promise.resolve(ctx.resume()).catch(() => {
+          audioUnlocked = false;
+        });
+        if (!audioUnlocked) unlockGate = resumed;
+      }
+      const buffer = ctx.createBuffer(1, 1, 22050);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start();
+      audioUnlocked = true;
     } catch {
-      /* ignore unlock failures */
+      /* a later tap can try again */
+    }
+  }
+  if (!synthPrimed) {
+    synthPrimed = true;
+    const synth = globalThis.speechSynthesis;
+    if (synth && typeof synth.speak === 'function' && globalThis.SpeechSynthesisUtterance) {
+      try {
+        const blip = new globalThis.SpeechSynthesisUtterance(' ');
+        blip.volume = 0;
+        blip.lang = 'en-GB';
+        Promise.resolve(synth.resume?.()).catch(() => {});
+        synth.speak(blip);
+      } catch {
+        synthPrimed = false;
+      }
     }
   }
   return unlockGate;
 }
 
-export async function playWithWebAudio(blob, win = globalThis) {
+export function stopProviderPlayback() {
+  const source = activeSource;
+  activeSource = null;
+  try {
+    source?.stop();
+  } catch {
+    /* already stopped */
+  }
+}
+
+export async function playWithWebAudio(blob, win = globalThis, onStart) {
   const ctx = sharedAudioContext(win);
   if (!ctx || typeof ctx.decodeAudioData !== 'function') throw new Error('no-web-audio');
-  if (ctx.state === 'suspended') await ctx.resume();
+  if (ctx.state === 'suspended') await withTimeout(ctx.resume(), 1500, win);
+  if (ctx.state === 'suspended') throw new Error('audio-suspended');
   const bytes = await blob.arrayBuffer();
-  const buffer = await ctx.decodeAudioData(bytes.slice(0));
+  const buffer = await withTimeout(ctx.decodeAudioData(bytes.slice(0)), 4000, win);
+  if (!buffer || !Number.isFinite(buffer.duration) || buffer.duration <= 0) throw new Error('bad-audio');
+  const startedAt = ctx.currentTime;
+  const t0 = typeof win.performance?.now === 'function' ? win.performance.now() : Date.now();
+  const now = () => (typeof win.performance?.now === 'function' ? win.performance.now() : Date.now());
   await new Promise((resolve, reject) => {
     const source = ctx.createBufferSource();
+    activeSource = source;
     source.buffer = buffer;
     source.connect(ctx.destination);
-    source.onended = () => resolve();
+    let settled = false;
+    let poll = 0;
+    let endTimer = 0;
+    let noted = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      win.clearTimeout(poll);
+      win.clearTimeout(endTimer);
+      if (activeSource === source) activeSource = null;
+      if (err) reject(err);
+      else resolve();
+    };
+    const noteStart = () => {
+      if (noted) return;
+      noted = true;
+      onStart?.();
+    };
+    source.onended = () => finish();
     try {
       source.start();
     } catch (err) {
-      reject(err);
+      finish(err);
+      return;
     }
-    win.setTimeout(resolve, Math.min(120000, Math.max(2000, buffer.duration * 1000 + 500)));
+    const check = () => {
+      if (settled) return;
+      if (ctx.currentTime > startedAt + 0.05) {
+        noteStart();
+        return;
+      }
+      if (now() - t0 > 2500) finish(new Error('audio-did-not-start'));
+      else poll = win.setTimeout(check, 200);
+    };
+    poll = win.setTimeout(check, 200);
+    endTimer = win.setTimeout(() => finish(), Math.min(20000, buffer.duration * 1000 + 600));
   });
 }
 
@@ -169,9 +247,11 @@ export function stopBrowserSpeech() {
   } catch {
     /* ignore */
   }
+  for (const finish of speechWaiters) finish();
+  speechWaiters.clear();
 }
 
-export function speakBrowser(text, { lang = 'en-GB', rate = 0.96 } = {}) {
+export function speakBrowser(text, { lang = 'en-GB', rate = 0.96, onStart } = {}) {
   const synth = globalThis.speechSynthesis;
   if (!synth || !globalThis.SpeechSynthesisUtterance) {
     return Promise.reject(new Error('no-speech-synthesis'));
@@ -189,26 +269,56 @@ export function speakBrowser(text, { lang = 'en-GB', rate = 0.96 } = {}) {
       const voice = pickBritishVoice(synth.getVoices?.() || []);
       if (voice) utterance.voice = voice;
       let settled = false;
+      let startTimer = 0;
+      let endTimer = 0;
+      let heardStart = false;
+      const cleanup = () => {
+        speechWaiters.delete(finish);
+        window.clearInterval(keepAlive);
+        window.clearTimeout(startTimer);
+        window.clearTimeout(endTimer);
+      };
       const finish = () => {
         if (settled) return;
         settled = true;
-        window.clearInterval(keepAlive);
+        cleanup();
         resolve();
       };
-      utterance.onend = finish;
-      utterance.onerror = () => {
+      const fail = (err) => {
         if (settled) return;
         settled = true;
-        window.clearInterval(keepAlive);
-        reject(new Error('speech-synthesis'));
+        cleanup();
+        reject(err);
       };
+      const noteStart = () => {
+        if (heardStart) return;
+        heardStart = true;
+        onStart?.();
+      };
+      speechWaiters.add(finish);
+      utterance.onstart = noteStart;
+      utterance.onend = finish;
+      utterance.onerror = () => fail(new Error('speech-synthesis'));
       const keepAlive = window.setInterval(() => {
-        if (synth.speaking) synth.resume?.();
-        else window.clearInterval(keepAlive);
-      }, 4000);
-      synth.resume?.();
+        if (synth.speaking || synth.pending) {
+          noteStart();
+          Promise.resolve(synth.resume?.()).catch(() => {});
+        }
+      }, 1000);
+      startTimer = window.setTimeout(() => {
+        if (settled) return;
+        if (heardStart || synth.speaking || synth.pending) {
+          noteStart();
+          return;
+        }
+        fail(new Error('speech-did-not-start'));
+      }, 2000);
+      endTimer = window.setTimeout(() => {
+        if (heardStart || synth.speaking || synth.pending) finish();
+        else fail(new Error('speech-did-not-start'));
+      }, Math.min(120000, Math.max(4000, String(text || '').length * 80)));
+      Promise.resolve(synth.resume?.()).catch(() => {});
       synth.speak(utterance);
-      window.setTimeout(finish, Math.min(120000, Math.max(4000, String(text || '').length * 80)));
     };
     const voices = synth.getVoices?.() || [];
     if (voices.length || !synth.addEventListener) {

@@ -17,10 +17,12 @@ import {
   recognitionProblem,
   sharedAudioContext,
   speakBrowser,
+  speakBudget,
   startBrowserRecognition,
   stopBrowserSpeech,
+  stopProviderPlayback,
   unlockAudio,
-  waitForAudioUnlock,
+  withTimeout,
 } from './speech.js';
 import { demoReply } from './demo.js';
 import { buildSessionReport, comparePronunciation, garbleTurn, goalProgress, looksGarbled, weekCounts } from './quality.js';
@@ -75,8 +77,8 @@ let recorderChunks = [];
 let recorderStream = null;
 let cancelListen = false;
 let toastTimer = 0;
-let currentObjectUrl = '';
 let speakGen = 0;
+let speakCancel = false;
 let silenceTimer = 0;
 let silenceFrame = 0;
 let autoSendTimer = 0;
@@ -931,7 +933,8 @@ function renderTalk() {
   const live = el('p', 'live', ui.live);
   live.id = 'live';
   dock.append(live);
-  if (!ui.pending) dock.append(composerBlock(), talkBlock());
+  if (!ui.pending) dock.append(composerBlock());
+  dock.append(talkBlock());
   const status = el('p', 'path', ui.status || idleStatus());
   status.id = 'status';
   status.setAttribute('aria-live', 'polite');
@@ -974,7 +977,7 @@ function talkBlock() {
   talk.type = 'button';
   talk.id = 'talk';
   talk.className = ui.listening ? 'talk is-live' : 'talk';
-  talk.disabled = ui.busy && !ui.listening;
+  talk.disabled = ui.busy && !ui.listening && !ui.speaking;
   talk.setAttribute('aria-pressed', ui.listening ? 'true' : 'false');
   talk.setAttribute('aria-label', ui.listening ? 'Zatrzymaj i wyślij' : 'Mów po angielsku');
   talk.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zm-7 9a1 1 0 0 0-2 0 9 9 0 0 0 8 8.9V22H9v2h6v-2h-2v-1.1A9 9 0 0 0 21 12a1 1 0 0 0-2 0 7 7 0 0 1-14 0z"/></svg><span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>';
@@ -982,7 +985,15 @@ function talkBlock() {
   label.id = 'talk-label';
   talk.append(label);
   talk.addEventListener('click', onTalk);
-  row.append(cancel, talk);
+  const interrupt = el('button', 'side-btn', 'Przerwij');
+  interrupt.type = 'button';
+  interrupt.id = 'stop-speech';
+  interrupt.hidden = !ui.speaking;
+  interrupt.addEventListener('click', () => {
+    unlockAudio();
+    interruptSpeech();
+  });
+  row.append(cancel, talk, interrupt);
   return row;
 }
 
@@ -1392,6 +1403,21 @@ async function diagnose(button, report) {
       lines.push(polishError(err));
     }
   }
+  if (!key) {
+    lines.push('Głos Sama: brak klucza, więc czytam głosem iPhone’a.');
+  } else {
+    const who = settings.provider === 'xai' ? 'xAI' : 'OpenAI';
+    try {
+      unlockAudio();
+      await withTimeout(playProviderClip('Hello from site.'), Math.min(8000, speakBudget('Hello from site.')));
+      lines.push(`Głos Sama (${who}): zagrał. Jeśli była cisza, wyłącz tryb cichy — przełącznik z boku iPhone’a.`);
+    } catch (err) {
+      const why = err?.name === 'TimeoutError' || err?.message === 'timeout'
+        ? 'Połączenie albo odtwarzanie trwało za długo.'
+        : 'Odtwarzanie nie wystartowało.';
+      lines.push(`Głos Sama (${who}): nie zagrał. ${why} Zostaje głos iPhone’a.`);
+    }
+  }
   if (settings.provider === 'xai') {
     lines.push('xAI: rozmowa idzie do api.x.ai. Gdy nagranie albo głos dostawcy odpadnie, zostaje pisanie i głos iPhone’a (en-GB).');
   }
@@ -1407,7 +1433,7 @@ function renderSettings() {
 
   const doctor = el('section', 'panel');
   doctor.append(el('h2', null, 'Czy działa?'));
-  doctor.append(el('p', null, 'Sprawdza mikrofon, dyktowanie, głos iPhone’a i klucz. Wynik zostaje na tym ekranie.'));
+  doctor.append(el('p', null, 'Sprawdza mikrofon, dyktowanie, głos iPhone’a, głos Sama i klucz. Wynik zostaje na tym ekranie.'));
   const test = el('button', 'send', 'Sprawdź telefon');
   test.type = 'button';
   test.id = 'diagnose';
@@ -1754,6 +1780,10 @@ function sendDraft() {
 
 async function onTalk() {
   unlockAudio();
+  if (ui.speaking) {
+    interruptSpeech();
+    return;
+  }
   stopSpeaking();
   if (ui.busy) return;
   if (ui.listening) {
@@ -2047,6 +2077,7 @@ async function onHeard(text) {
 async function submitText(text, opts = {}) {
   const clean = String(text || '').trim();
   if (!clean || ui.busy) return;
+  unlockAudio();
   cancelAutoSend();
   ui.pending = '';
   document.getElementById('review')?.remove();
@@ -2065,10 +2096,12 @@ async function submitText(text, opts = {}) {
     hidden: Boolean(opts.hidden),
     at: Date.now(),
   });
+  ui.pending = '';
   ui.busy = true;
   clearProblem();
-  paintListen();
   setStatus(activeKey(settings) ? 'Myślę…' : 'Tryb próbny…');
+  if (ui.route === 'talk' && !ui.onboard && !opts.hidden) render();
+  else paintListen();
   try {
     const turn = await produceTurn(clean, opts);
     if (!turn.reply) throw new ProviderError('Pusta odpowiedź.');
@@ -2087,11 +2120,10 @@ async function submitText(text, opts = {}) {
     let spoke = false;
     if (settings.autoSpeak && !opts.hidden) {
       setStatus('Mówię…');
-      try {
-        await speak(turn.reply);
-        spoke = true;
-      } catch {
-        setStatus('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie. Sprawdź, czy iPhone nie jest wyciszony.');
+      const heard = await speak(turn.reply);
+      if (heard === 'played') spoke = true;
+      else if (heard === 'failed') {
+        showProblem('Nie udało się odtworzyć głosu. Tekst zostaje na ekranie. Sprawdź dźwięk, stuknij Odsłuchaj, albo Ustawienia → Sprawdź telefon.');
       }
     }
     if (spoke && settings.heardSam !== 'yes') ui.heardPrompt = true;
@@ -2187,13 +2219,15 @@ function paintListen() {
   if (talk) {
     talk.classList.toggle('is-live', ui.listening);
     talk.classList.toggle('is-speaking', ui.speaking && !ui.listening);
-    talk.disabled = ui.busy && !ui.listening;
+    talk.disabled = ui.busy && !ui.listening && !ui.speaking;
     talk.setAttribute('aria-pressed', ui.listening ? 'true' : 'false');
   }
   document.querySelectorAll('.avatar').forEach((node) => {
     node.classList.toggle('is-speaking', ui.speaking && !ui.listening);
   });
   if (label) label.textContent = ui.listening ? 'Stop' : 'Mów';
+  const interrupt = document.getElementById('stop-speech');
+  if (interrupt) interrupt.hidden = !ui.speaking;
   if (cancel) cancel.hidden = !ui.listening;
   if (send) send.disabled = ui.busy;
 }
@@ -2227,66 +2261,105 @@ function currentVoice() {
   return settings.provider === 'xai' ? settings.xaiVoice : settings.openaiVoice;
 }
 
+function interruptSpeech() {
+  if (speakStop) speakStop();
+  else {
+    speakCancel = true;
+    stopSpeaking();
+  }
+}
+
 async function speak(text, { slow = false } = {}) {
   abandonRecognizer();
   const line = String(text || '').trim();
-  if (!line) return;
+  if (!line) return 'stopped';
   const gen = ++speakGen;
+  speakCancel = false;
   ui.speaking = true;
   paintListen();
+  const budget = speakBudget(line) + 6500;
+  let timer = 0;
+  let started = false;
+  let cancelWait = () => {};
+  const cancelled = new Promise((resolve) => {
+    cancelWait = () => resolve('stopped');
+  });
+  speakStop = () => {
+    speakCancel = true;
+    stopSpeaking();
+    cancelWait();
+  };
   try {
-    const useProvider = settings.voiceMode === 'provider' && activeKey(settings);
-    if (useProvider && ui.providerSpeech !== false) {
-      try {
-        const blob = await synthesizeSpeech({
-          provider: settings.provider,
-          apiKey: activeKey(settings),
-          text: line,
-          voice: currentVoice(),
-        });
-        await playBlob(blob);
-        return;
-      } catch (err) {
-        if (err instanceof ProviderError && (err.status === 404 || err.status === 405)) ui.providerSpeech = false;
-        setStatus('Głos dostawcy niedostępny. Czytam głosem iPhone’a.');
-      }
-    }
-    await speakBrowser(line, { lang: 'en-GB', rate: slow ? 0.9 : 0.96 });
+    const work = playReply(line, slow, () => {
+      started = true;
+    }).then((kind) => (speakCancel || gen !== speakGen ? 'stopped' : kind)).catch(() => (
+      speakCancel || gen !== speakGen ? 'stopped' : 'failed'
+    ));
+    const outcome = await Promise.race([
+      work,
+      new Promise((resolve) => {
+        timer = window.setTimeout(() => resolve(started ? 'played' : 'failed'), budget);
+      }),
+      cancelled,
+    ]);
+    if (gen !== speakGen) return 'stopped';
+    if (outcome !== 'provider' && outcome !== 'browser') stopSpeaking();
+    return outcome === 'provider' || outcome === 'browser' || outcome === 'played' ? 'played' : outcome;
   } finally {
+    window.clearTimeout(timer);
     if (gen === speakGen) {
+      speakStop = null;
       ui.speaking = false;
       paintListen();
     }
   }
 }
 
-async function playBlob(blob) {
-  await waitForAudioUnlock();
-  try {
-    await playWithWebAudio(blob);
-    return;
-  } catch {
-    /* Web Audio keeps dictation alive on iOS. The <audio> tag is only a fallback. */
+async function playReply(line, slow, onStart) {
+  const gen = speakGen;
+  const aborted = () => speakCancel || gen !== speakGen;
+  unlockAudio();
+  const useProvider = settings.voiceMode === 'provider' && activeKey(settings) && ui.providerSpeech !== false;
+  if (useProvider) {
+    try {
+      await withTimeout(playProviderClip(line, onStart), 5000);
+      if (aborted()) return 'stopped';
+      return 'provider';
+    } catch (err) {
+      stopProviderPlayback();
+      if (aborted()) return 'stopped';
+      if (err instanceof ProviderError && (err.status === 404 || err.status === 405)) ui.providerSpeech = false;
+      setStatus('Głos dostawcy niedostępny. Czytam głosem iPhone’a.');
+    }
   }
-  ui.recognitionBroken = true;
-  if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
-  currentObjectUrl = URL.createObjectURL(blob);
-  audioEl.src = currentObjectUrl;
-  await audioEl.play();
-  await new Promise((resolve, reject) => {
-    const finish = () => resolve();
-    audioEl.onended = finish;
-    audioEl.onpause = () => {
-      if (audioEl.ended || audioEl.currentTime > 0) finish();
-    };
-    audioEl.onerror = () => reject(new Error('audio'));
-  });
+  if (aborted()) return 'stopped';
+  try {
+    await speakBrowser(line, { lang: 'en-GB', rate: slow ? 0.9 : 0.96, onStart });
+  } catch {
+    return aborted() ? 'stopped' : 'failed';
+  }
+  if (aborted()) return 'stopped';
+  return 'browser';
 }
 
+async function playProviderClip(text, onStart) {
+  const blob = await withTimeout(synthesizeSpeech({
+    provider: settings.provider,
+    apiKey: activeKey(settings),
+    text,
+    voice: currentVoice(),
+  }), 8000);
+  await playWithWebAudio(blob, globalThis, onStart);
+}
+
+let speakStop = null;
+
 function stopSpeaking() {
+  stopProviderPlayback();
   stopBrowserSpeech();
   try {
     audioEl.pause();
+    audioEl.removeAttribute('src');
   } catch {
     /* ignore */
   }
